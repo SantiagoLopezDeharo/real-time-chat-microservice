@@ -259,11 +259,41 @@ JWT_SECRET=your-jwt-secret
 - [**ARCHITECTURE.md**](./ARCHITECTURE.md) - Deep dive into system design
 - [**PAGINATION.md**](./PAGINATION.md) - Complete pagination guide with examples
 - [**MIGRATION.md**](./MIGRATION.md) - Upgrading from channel-ID-based systems
+- [**CONCURRENCY.md**](./CONCURRENCY.md) - Concurrency optimizations and worker pools
+- [**test/README.md**](./test/README.md) - Integration test suite documentation
 - [**demo/README.md**](./demo/README.md) - Demo client usage guide
 
 ## 🧪 Testing
 
-### Multi-User Chat Test
+### Integration Test Suite
+
+The project includes a comprehensive integration test suite that validates the entire system under high-concurrency scenarios:
+
+```bash
+# Run all tests
+go test -v ./test
+
+# Or use the test runner script
+./test/run_tests.sh all
+
+# Run with race detection
+./test/run_tests.sh race
+
+# Run with coverage
+./test/run_tests.sh coverage
+```
+
+**Test Coverage**:
+- ✅ High concurrency (10 users, 90 concurrent messages)
+- ✅ Group chat functionality (multi-participant channels)
+- ✅ Pagination system validation
+- ✅ Authorization and access control
+- ✅ Sender exclusion from broadcasts
+- ✅ Database persistence verification
+
+See [test/README.md](./test/README.md) for detailed test documentation.
+
+### Manual Multi-User Chat Test
 
 **Terminal 1 (Alice)**:
 ```bash

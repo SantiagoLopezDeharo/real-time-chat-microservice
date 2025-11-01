@@ -10,7 +10,6 @@ export class ChatWebSocketClient {
 
   connect() {
     return new Promise((resolve, reject) => {
-      // WebSocket connects to user's personal channel
       const url = `${this.serverUrl}/ws`;
       
       this.ws = new WebSocket(url, {
