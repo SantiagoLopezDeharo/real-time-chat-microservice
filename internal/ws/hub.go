@@ -6,29 +6,44 @@ import (
 )
 
 type Hub struct {
-	Register   chan *Client
-	Unregister chan *Client
-	Broadcast  chan *BroadcastMessage
-	clients    map[string]map[*Client]bool // userID -> set of clients
-	mu         sync.RWMutex
+	Register         chan *Client
+	Unregister       chan *Client
+	Broadcast        chan *BroadcastMessage
+	clients          map[string]map[*Client]bool
+	mu               sync.RWMutex
+	broadcastQueue   chan *broadcastJob
+	numBcastWorkers  int
+	numBcastJobQueue int
+}
+
+type broadcastJob struct {
+	client  *Client
+	message []byte
 }
 
 type BroadcastMessage struct {
-	Participants []string // User IDs that are part of this channel
+	Participants []string
 	Message      []byte
-	SenderID     string // To exclude sender from receiving their own message
+	SenderID     string
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
-		Broadcast:  make(chan *BroadcastMessage),
-		clients:    make(map[string]map[*Client]bool),
+		Register:         make(chan *Client),
+		Unregister:       make(chan *Client),
+		Broadcast:        make(chan *BroadcastMessage),
+		clients:          make(map[string]map[*Client]bool),
+		broadcastQueue:   make(chan *broadcastJob, 1024),
+		numBcastWorkers:  4,
+		numBcastJobQueue: 1024,
 	}
 }
 
 func (h *Hub) Run() {
+	for i := 0; i < h.numBcastWorkers; i++ {
+		go h.broadcastWorker()
+	}
+
 	for {
 		select {
 		case client := <-h.Register:
@@ -37,6 +52,17 @@ func (h *Hub) Run() {
 			h.unregisterClient(client)
 		case broadcastMessage := <-h.Broadcast:
 			h.broadcastMessage(broadcastMessage)
+		}
+	}
+}
+
+func (h *Hub) broadcastWorker() {
+	for job := range h.broadcastQueue {
+		select {
+		case job.client.send <- job.message:
+		default:
+
+			h.Unregister <- job.client
 		}
 	}
 }
@@ -61,8 +87,6 @@ func (h *Hub) unregisterClient(client *Client) {
 			delete(userClients, client)
 			close(client.send)
 			log.Printf("client unregistered from user %s, total connections for user=%d", client.userID, len(userClients))
-
-			// Clean up empty user entries
 			if len(userClients) == 0 {
 				delete(h.clients, client.userID)
 			}
@@ -74,30 +98,22 @@ func (h *Hub) broadcastMessage(broadcastMessage *BroadcastMessage) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	// Send message to all participants except the sender
 	for _, participantID := range broadcastMessage.Participants {
-		// Skip sender
 		if participantID == broadcastMessage.SenderID {
 			continue
 		}
 
-		// Get all WebSocket connections for this participant
 		if userClients, ok := h.clients[participantID]; ok {
 			for client := range userClients {
-				go func(c *Client) {
-					select {
-					case c.send <- broadcastMessage.Message:
-					default:
-						// Client's send channel is full, unregister
-						h.Unregister <- c
-					}
-				}(client)
+				h.broadcastQueue <- &broadcastJob{
+					client:  client,
+					message: broadcastMessage.Message,
+				}
 			}
 		}
 	}
 }
 
-// GetUserConnectionCount returns the number of active connections for a specific user
 func (h *Hub) GetUserConnectionCount(userID string) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -108,7 +124,6 @@ func (h *Hub) GetUserConnectionCount(userID string) int {
 	return 0
 }
 
-// GetChannelParticipantCounts returns which participants in a channel have active connections
 func (h *Hub) GetChannelParticipantCounts(participants []string) map[string]int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

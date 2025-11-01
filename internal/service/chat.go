@@ -2,7 +2,9 @@ package service
 
 import (
 	"encoding/json"
+	"log"
 	"sort"
+	"time"
 
 	"chat-microservice/internal/repository"
 	"chat-microservice/internal/ws"
@@ -10,17 +12,62 @@ import (
 )
 
 type ChatService struct {
-	repo       repository.Repository
-	hub        *ws.Hub
-	maxRetries int
+	repo             repository.Repository
+	hub              *ws.Hub
+	maxRetries       int
+	dbWriteQueue     chan *models.Message
+	numDBWokers      int
+	numDBJobQueue    int
+	dbWriteStopQueue chan bool
 }
 
 func NewChatService(repo repository.Repository, hub *ws.Hub, maxRetries int) *ChatService {
-	return &ChatService{
-		repo:       repo,
-		hub:        hub,
-		maxRetries: maxRetries,
+	s := &ChatService{
+		repo:             repo,
+		hub:              hub,
+		maxRetries:       maxRetries,
+		dbWriteQueue:     make(chan *models.Message, 1024),
+		numDBWokers:      4,
+		numDBJobQueue:    1024,
+		dbWriteStopQueue: make(chan bool),
 	}
+
+	for i := 0; i < s.numDBWokers; i++ {
+		go s.dbWorker()
+	}
+
+	return s
+}
+
+func (s *ChatService) dbWorker() {
+	log.Println("DB worker started")
+	for {
+		select {
+		case msg := <-s.dbWriteQueue:
+			var lastErr error
+			for attempt := 1; attempt <= s.maxRetries; attempt++ {
+				err := s.repo.Save(msg)
+				if err == nil {
+					break
+				}
+				lastErr = err
+				log.Printf("failed to save message (attempt %d/%d): %v", attempt, s.maxRetries, err)
+				if attempt < s.maxRetries {
+					time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+				}
+			}
+			if lastErr != nil {
+				log.Printf("failed to save message after %d attempts: %v", s.maxRetries, lastErr)
+			}
+		case <-s.dbWriteStopQueue:
+			log.Println("DB worker stopped")
+			return
+		}
+	}
+}
+
+func (s *ChatService) Stop() {
+	close(s.dbWriteStopQueue)
 }
 
 func (s *ChatService) Hub() *ws.Hub { return s.hub }
@@ -42,34 +89,26 @@ func (s *ChatService) BroadcastMessage(m *models.Message) error {
 
 	s.hub.Broadcast <- broadcastMessage
 
-	s.repo.SaveAsync(m, s.maxRetries)
+	s.dbWriteQueue <- m
 
 	return nil
 }
 
-// GetMessagesForChannel returns all messages for a channel if the user is a participant
 func (s *ChatService) GetMessagesForChannel(participants []string, userID string) ([]*models.Message, error) {
-	// Check if user is part of the channel
 	if !models.ContainsUser(participants, userID) {
 		return []*models.Message{}, nil
 	}
 
-	// Sort participants for consistent lookup
 	sort.Strings(participants)
 
 	return s.repo.GetMessagesByParticipants(participants)
 }
 
-// GetMessagesForChannelWithPagination returns paginated messages for a channel if the user is a participant
-// page: page number (0-indexed)
-// size: number of messages per page
 func (s *ChatService) GetMessagesForChannelWithPagination(participants []string, userID string, page int, size int) ([]*models.Message, error) {
-	// Check if user is part of the channel
 	if !models.ContainsUser(participants, userID) {
 		return []*models.Message{}, nil
 	}
 
-	// Sort participants for consistent lookup
 	sort.Strings(participants)
 
 	return s.repo.GetMessagesByParticipantsWithPagination(participants, page, size)

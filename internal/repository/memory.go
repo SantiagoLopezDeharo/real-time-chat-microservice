@@ -15,7 +15,6 @@ import (
 
 type Repository interface {
 	Save(*models.Message) error
-	SaveAsync(*models.Message, int)
 	List() []*models.Message
 	GetMessagesByParticipants(participants []string) ([]*models.Message, error)
 	GetMessagesByParticipantsWithPagination(participants []string, page int, size int) ([]*models.Message, error)
@@ -40,7 +39,6 @@ func NewMongoRepository(mongoURI, database, collection string) (*MongoRepository
 
 	coll := client.Database(database).Collection(collection)
 
-	// Create index on participants array for efficient querying
 	indexModel := mongo.IndexModel{
 		Keys: bson.D{{Key: "participants", Value: 1}},
 	}
@@ -52,11 +50,13 @@ func NewMongoRepository(mongoURI, database, collection string) (*MongoRepository
 	return &MongoRepository{collection: coll}, nil
 }
 
+func (m *MongoRepository) Collection() *mongo.Collection {
+	return m.collection
+}
+
 func (m *MongoRepository) Save(msg *models.Message) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	// Ensure participants are sorted before saving
 	sort.Strings(msg.Participants)
 
 	_, err := m.collection.InsertOne(ctx, msg)
@@ -86,13 +86,9 @@ func (m *MongoRepository) List() []*models.Message {
 func (m *MongoRepository) GetMessagesByParticipants(participants []string) ([]*models.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	// Ensure participants are sorted
 	sorted := make([]string, len(participants))
 	copy(sorted, participants)
 	sort.Strings(sorted)
-
-	// Query for exact match of participants array (order-independent due to sorting)
 	filter := bson.M{"participants": sorted}
 
 	cursor, err := m.collection.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
@@ -109,27 +105,14 @@ func (m *MongoRepository) GetMessagesByParticipants(participants []string) ([]*m
 	return messages, nil
 }
 
-// GetMessagesByParticipantsWithPagination retrieves messages with pagination
-// Messages are sorted by created_at descending (latest first)
-// page: page number (0-indexed)
-// size: number of messages per page
-// offset = size * page
 func (m *MongoRepository) GetMessagesByParticipantsWithPagination(participants []string, page int, size int) ([]*models.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	// Ensure participants are sorted
 	sorted := make([]string, len(participants))
 	copy(sorted, participants)
 	sort.Strings(sorted)
-
-	// Calculate offset
 	offset := int64(size * page)
-
-	// Query for exact match of participants array (order-independent due to sorting)
 	filter := bson.M{"participants": sorted}
-
-	// Sort by created_at descending (latest first), skip offset, limit by size
 	findOptions := options.Find().
 		SetSort(bson.D{{Key: "created_at", Value: -1}}).
 		SetSkip(offset).
@@ -147,22 +130,4 @@ func (m *MongoRepository) GetMessagesByParticipantsWithPagination(participants [
 	}
 
 	return messages, nil
-}
-
-func (m *MongoRepository) SaveAsync(msg *models.Message, maxRetries int) {
-	go func() {
-		var lastErr error
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			err := m.Save(msg)
-			if err == nil {
-				return
-			}
-			lastErr = err
-			log.Printf("failed to save message (attempt %d/%d): %v", attempt, maxRetries, err)
-			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
-			}
-		}
-		log.Printf("failed to save message after %d attempts: %v", maxRetries, lastErr)
-	}()
 }
