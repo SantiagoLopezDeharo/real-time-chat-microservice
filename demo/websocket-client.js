@@ -1,17 +1,18 @@
 import WebSocket from 'ws';
 
 export class ChatWebSocketClient {
-  constructor(serverUrl, token, channelId) {
+  constructor(serverUrl, token) {
     this.serverUrl = serverUrl;
     this.token = token;
-    this.channelId = channelId;
     this.ws = null;
-    this.messageHandlers = [];
+    this.messageHandler = null;
   }
 
   connect() {
     return new Promise((resolve, reject) => {
-      const url = `${this.serverUrl}/ws?channel=${this.channelId}`;
+      // WebSocket connects to user's personal channel
+      const url = `${this.serverUrl}/ws`;
+      
       this.ws = new WebSocket(url, {
         headers: {
           'Authorization': `Bearer ${this.token}`
@@ -19,16 +20,18 @@ export class ChatWebSocketClient {
       });
 
       this.ws.on('open', () => {
-        console.log(`✓ Connected to channel: ${this.channelId}`);
+        console.log('✓ Connected to WebSocket');
         resolve();
       });
 
       this.ws.on('message', (data) => {
         try {
           const message = JSON.parse(data.toString());
-          this.messageHandlers.forEach(handler => handler(message));
+          if (this.messageHandler) {
+            this.messageHandler(message);
+          }
         } catch (error) {
-          console.error('Failed to parse message:', error.message);
+          console.error('Failed to parse message:', error);
         }
       });
 
@@ -38,19 +41,18 @@ export class ChatWebSocketClient {
       });
 
       this.ws.on('close', () => {
-        console.log('✗ Disconnected from server');
+        console.log('✗ Disconnected from WebSocket');
       });
     });
   }
 
   onMessage(handler) {
-    this.messageHandlers.push(handler);
+    this.messageHandler = handler;
   }
 
   disconnect() {
     if (this.ws) {
       this.ws.close();
-      this.ws = null;
     }
   }
 }

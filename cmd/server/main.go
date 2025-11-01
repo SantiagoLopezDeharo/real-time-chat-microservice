@@ -51,8 +51,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", h.Health)
 	mux.HandleFunc("/ws", middleware.JWTAuth(h.HandleWebsocket))
-	mux.HandleFunc("/api/messages/counts", h.HandleGetClientCounts)
-	mux.HandleFunc("/api/messages/", middleware.JWTAuth(h.HandleMessages))
+	mux.HandleFunc("/api/messages", middleware.JWTAuth(h.HandleSendMessage))
+	mux.HandleFunc("/api/messages/get", middleware.JWTAuth(h.HandleGetMessages))
+	mux.HandleFunc("/api/connections", h.HandleGetUserConnections)
 
 	addr := ":8080"
 	if v := os.Getenv("PORT"); v != "" {

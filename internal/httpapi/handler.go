@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"chat-microservice/internal/middleware"
@@ -35,16 +37,12 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "time": time.Now().Format(time.RFC3339)})
 }
 
+// HandleWebsocket upgrades connection and registers client by their user ID
+// No channel parameter needed - user connects once and receives messages from all their channels
 func (h *Handler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
-	channelID := r.URL.Query().Get("channel")
-	if channelID == "" {
-		http.Error(w, "channel ID is required", http.StatusBadRequest)
-		return
-	}
-
 	claims := middleware.GetUserClaims(r)
-	if !middleware.CanAccessChannel(claims, channelID) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if claims == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -54,19 +52,15 @@ func (h *Handler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := ws.NewClient(conn, h.svc.Hub(), channelID)
+	client := ws.NewClient(conn, h.svc.Hub(), claims.ID)
 	client.Start()
 }
 
+// HandleSendMessage sends a message to a channel identified by participant IDs
+// POST /api/messages with body: {"participants": ["user1", "user2"], "content": "message"}
 func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	channelID := r.URL.Path[len("/api/messages/"):]
-	if channelID == "" {
-		http.Error(w, "channel ID is required", http.StatusBadRequest)
 		return
 	}
 
@@ -77,18 +71,30 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
-		Content string `json:"content"`
+		Participants []string `json:"participants"`
+		Content      string   `json:"content"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
+	if len(payload.Participants) == 0 {
+		http.Error(w, "participants array is required", http.StatusBadRequest)
+		return
+	}
+
+	// Sender must be part of the participants
+	if !models.ContainsUser(payload.Participants, claims.ID) {
+		http.Error(w, "forbidden: sender must be part of participants", http.StatusForbidden)
+		return
+	}
+
 	msg := &models.Message{
-		Sender:    claims.ID,
-		Content:   payload.Content,
-		CreatedAt: time.Now(),
-		ChannelID: channelID,
+		Sender:       claims.ID,
+		Content:      payload.Content,
+		CreatedAt:    time.Now(),
+		Participants: payload.Participants,
 	}
 
 	if err := h.svc.BroadcastMessage(msg); err != nil {
@@ -97,42 +103,16 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"status": "message queued"})
 }
 
-func (h *Handler) HandleGetClientCounts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var payload struct {
-		Channels []string `json:"channels"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	if len(payload.Channels) == 0 {
-		http.Error(w, "channels array is required", http.StatusBadRequest)
-		return
-	}
-
-	counts := h.svc.Hub().GetClientCounts(payload.Channels)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(counts)
-}
-
+// HandleGetMessages retrieves messages for a channel identified by participant IDs
+// GET /api/messages/get?participants=user1,user2,user3&page=0&size=20
+// page: page number (0-indexed, default: 0)
+// size: messages per page (default: 50, max: 100)
 func (h *Handler) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	channelID := r.URL.Path[len("/api/messages/"):]
-	if channelID == "" || channelID == "counts" {
-		http.Error(w, "channel ID is required", http.StatusBadRequest)
 		return
 	}
 
@@ -142,7 +122,38 @@ func (h *Handler) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messages, err := h.svc.GetMessagesForChannel(channelID, claims.ID, claims.Groups)
+	participantsStr := r.URL.Query().Get("participants")
+	if participantsStr == "" {
+		http.Error(w, "participants query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	participants := strings.Split(participantsStr, ",")
+	for i, p := range participants {
+		participants[i] = strings.TrimSpace(p)
+	}
+
+	// Parse pagination parameters
+	page := 0
+	size := 50 // Default page size
+
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p >= 0 {
+			page = p
+		}
+	}
+
+	if sizeStr := r.URL.Query().Get("size"); sizeStr != "" {
+		if s, err := strconv.Atoi(sizeStr); err == nil && s > 0 {
+			size = s
+			// Cap at 100 messages per page
+			if size > 100 {
+				size = 100
+			}
+		}
+	}
+
+	messages, err := h.svc.GetMessagesForChannelWithPagination(participants, claims.ID, page, size)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -152,12 +163,29 @@ func (h *Handler) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages)
 }
 
-func (h *Handler) HandleMessages(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		h.HandleGetMessages(w, r)
-	} else if r.Method == http.MethodPost {
-		h.HandleSendMessage(w, r)
-	} else {
+// HandleGetUserConnections returns the connection count for specific users
+// POST /api/connections with body: {"users": ["user1", "user2"]}
+func (h *Handler) HandleGetUserConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
+
+	var payload struct {
+		Users []string `json:"users"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if len(payload.Users) == 0 {
+		http.Error(w, "users array is required", http.StatusBadRequest)
+		return
+	}
+
+	counts := h.svc.Hub().GetChannelParticipantCounts(payload.Users)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(counts)
 }

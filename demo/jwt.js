@@ -2,10 +2,9 @@ import jwt from 'jsonwebtoken';
 
 const JWT_SECRET = 'your-jwt-secret';
 
-export function createToken(userId, groups = []) {
+export function createToken(userId) {
   const payload = {
     id: userId,
-    groups: groups,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + (60 * 60 * 24)
   };
