@@ -5,15 +5,28 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"chat-microservice/internal/httpapi"
 	"chat-microservice/internal/middleware"
 	"chat-microservice/internal/repository"
 	"chat-microservice/internal/service"
 	"chat-microservice/internal/ws"
+
+	"github.com/joho/godotenv"
+	"golang.org/x/time/rate"
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using environment variables")
+	}
+
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable not set")
+	}
+
 	mongoURI := os.Getenv("MONGO_URI")
 	if mongoURI == "" {
 		mongoURI = "mongodb://localhost:27017"
@@ -36,6 +49,20 @@ func main() {
 		}
 	}
 
+	rps := rate.Limit(5)
+	if rpsStr := os.Getenv("RATE_LIMIT_RPS"); rpsStr != "" {
+		if parsed, err := strconv.ParseFloat(rpsStr, 64); err == nil && parsed > 0 {
+			rps = rate.Limit(parsed)
+		}
+	}
+
+	burst := 10
+	if burstStr := os.Getenv("RATE_LIMIT_BURST"); burstStr != "" {
+		if parsed, err := strconv.Atoi(burstStr); err == nil && parsed > 0 {
+			burst = parsed
+		}
+	}
+
 	repo, err := repository.NewMongoRepository(mongoURI, mongoDB, mongoCollection)
 	if err != nil {
 		log.Fatalf("failed to connect to MongoDB: %v", err)
@@ -48,11 +75,21 @@ func main() {
 
 	h := httpapi.NewHandler(svc)
 
+	authMiddleware := middleware.NewAuthMiddleware(jwtSecret)
+	rateLimiter := middleware.NewRateLimiter(rps, burst)
+
 	mux := http.NewServeMux()
+
+	protectedAPI := http.NewServeMux()
+	protectedAPI.HandleFunc("/api/messages", h.HandleSendMessage)
+	protectedAPI.HandleFunc("/api/messages/get", h.HandleGetMessages)
+
+	protectedWS := http.NewServeMux()
+	protectedWS.HandleFunc("/ws", h.HandleWebsocket)
+
 	mux.HandleFunc("/health", h.Health)
-	mux.HandleFunc("/ws", middleware.JWTAuth(h.HandleWebsocket))
-	mux.HandleFunc("/api/messages", middleware.JWTAuth(h.HandleSendMessage))
-	mux.HandleFunc("/api/messages/get", middleware.JWTAuth(h.HandleGetMessages))
+	mux.Handle("/api/", authMiddleware.Verify(rateLimiter.Middleware(protectedAPI)))
+	mux.Handle("/ws", authMiddleware.Verify(protectedWS))
 	mux.HandleFunc("/api/connections", h.HandleGetUserConnections)
 
 	addr := ":8080"
@@ -60,8 +97,16 @@ func main() {
 		addr = ":" + v
 	}
 
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
 	log.Printf("starting server on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
 }

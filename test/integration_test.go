@@ -24,6 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -55,7 +56,7 @@ type SimulatedUser struct {
 
 func NewSimulatedUser(t *testing.T, id int, wg *sync.WaitGroup) *SimulatedUser {
 	userID := fmt.Sprintf("user-%d", id)
-	token, err := middleware.GenerateJWT(userID, jwtSecretTest)
+	token, err := GenerateTestJWT(userID, jwtSecretTest)
 	require.NoError(t, err)
 
 	return &SimulatedUser{
@@ -151,9 +152,9 @@ func TestMain(m *testing.M) {
 	authMiddleware := middleware.NewAuthMiddleware(jwtSecretTest)
 
 	router := http.NewServeMux()
-	router.HandleFunc("/ws", authMiddleware.Verify(handler.HandleWebsocket))
-	router.HandleFunc("/api/messages", authMiddleware.Verify(handler.HandleSendMessage))
-	router.HandleFunc("/api/messages/get", authMiddleware.Verify(handler.HandleGetMessages))
+	router.Handle("/ws", authMiddleware.Verify(http.HandlerFunc(handler.HandleWebsocket)))
+	router.Handle("/api/messages", authMiddleware.Verify(http.HandlerFunc(handler.HandleSendMessage)))
+	router.Handle("/api/messages/get", authMiddleware.Verify(http.HandlerFunc(handler.HandleGetMessages)))
 
 	testServer = httptest.NewServer(router)
 	defer testServer.Close()
@@ -471,6 +472,99 @@ func TestSenderMustBeParticipant(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "Expected forbidden when sender not in participants")
 
 	log.Printf("Sender validation test completed successfully!")
+}
+
+func TestRateLimiting(t *testing.T) {
+	rateLimitRPS := 2.0
+	rateLimitBurst := 3
+
+	repo, err := repository.NewMongoRepository(mongoURITest, dbNameTest, collectionTest+"_ratelimit")
+	if err != nil {
+		t.Skip("Skipping test: MongoDB not available")
+	}
+
+	hub := ws.NewHub()
+	go hub.Run()
+	svc := service.NewChatService(repo, hub, 3)
+	defer svc.Stop()
+
+	authMiddleware := middleware.NewAuthMiddleware(jwtSecretTest)
+	rateLimiter := middleware.NewRateLimiter(rate.Limit(rateLimitRPS), rateLimitBurst)
+
+	handler := httpapi.NewHandler(svc)
+
+	router := http.NewServeMux()
+	router.Handle("/api/messages", authMiddleware.Verify(rateLimiter.Middleware(http.HandlerFunc(handler.HandleSendMessage))))
+
+	rateLimitTestServer := httptest.NewServer(router)
+	defer rateLimitTestServer.Close()
+
+	var wg sync.WaitGroup
+	user := NewSimulatedUser(t, 999, &wg)
+
+	rateLimitHit := false
+	successCount := 0
+
+	for i := 0; i < 10; i++ {
+		url := rateLimitTestServer.URL + "/api/messages"
+		payload := fmt.Sprintf(`{"participants": ["user-999"], "content": "rate limit test %d"}`, i)
+		req, _ := http.NewRequest("POST", url, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+user.Token)
+
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			rateLimitHit = true
+			resp.Body.Close()
+			break
+		} else if resp.StatusCode == http.StatusAccepted {
+			successCount++
+		}
+		resp.Body.Close()
+	}
+
+	assert.True(t, rateLimitHit, "Expected rate limit to be exceeded after %d successful requests", successCount)
+
+	time.Sleep(2 * time.Second)
+
+	url2 := rateLimitTestServer.URL + "/api/messages"
+	payload2 := `{"participants": ["user-999"], "content": "rate limit test after recovery"}`
+	req2, _ := http.NewRequest("POST", url2, strings.NewReader(payload2))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+user.Token)
+
+	resp2, err2 := http.DefaultClient.Do(req2)
+	require.NoError(t, err2)
+	defer resp2.Body.Close()
+
+	assert.Equal(t, http.StatusAccepted, resp2.StatusCode, "Request should succeed after waiting")
+
+	log.Println("Rate limiting test completed successfully!")
+}
+
+func TestInvalidToken(t *testing.T) {
+	var wg sync.WaitGroup
+	user := NewSimulatedUser(t, 888, &wg)
+
+	// Generate a token with a wrong secret
+	invalidToken, err := GenerateTestJWT(user.ID, "wrong-secret")
+	require.NoError(t, err)
+
+	url := testServer.URL + "/api/messages"
+	payload := `{"participants": ["user-888"], "content": "invalid token test"}`
+	req, _ := http.NewRequest("POST", url, strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+invalidToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "Expected unauthorized with invalid token")
+
+	log.Println("Invalid token test completed successfully!")
 }
 
 // waitTimeout waits for the waitgroup for the specified duration.

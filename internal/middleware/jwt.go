@@ -2,23 +2,25 @@ package middleware
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type contextKey string
 
 const (
-	UserContextKey contextKey = "user"
+	UserContextKey contextKey = "userID"
 )
 
-type UserClaims struct {
+type CustomClaims struct {
 	ID string `json:"id"`
+	jwt.RegisteredClaims
 }
+
 type AuthMiddleware struct {
 	secret string
 }
@@ -26,8 +28,9 @@ type AuthMiddleware struct {
 func NewAuthMiddleware(secret string) *AuthMiddleware {
 	return &AuthMiddleware{secret: secret}
 }
-func (am *AuthMiddleware) Verify(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+
+func (am *AuthMiddleware) Verify(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "missing authorization header", http.StatusUnauthorized)
@@ -40,95 +43,44 @@ func (am *AuthMiddleware) Verify(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		token := parts[1]
-		claims, err := parseJWT(token)
-		if err != nil {
+		tokenString := parts[1]
+
+		claims := &CustomClaims{}
+
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(am.secret), nil
+		})
+
+		if err != nil || !token.Valid {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), UserContextKey, claims)
+		ctx := context.WithValue(r.Context(), UserContextKey, claims.ID)
 		next.ServeHTTP(w, r.WithContext(ctx))
-	}
+	})
 }
 
 func GenerateJWT(userID string, secret string) (string, error) {
-	header := map[string]string{
-		"alg": "HS256",
-		"typ": "JWT",
+	claims := CustomClaims{
+		ID: userID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
+			Issuer:    "chat-microservice",
+			Subject:   userID,
+		},
 	}
-	headerJSON, _ := json.Marshal(header)
-	headerEncoded := base64.RawURLEncoding.EncodeToString(headerJSON)
 
-	payload := map[string]interface{}{
-		"id":  userID,
-		"iat": time.Now().Unix(),
-		"exp": time.Now().Add(24 * time.Hour).Unix(),
-	}
-	payloadJSON, _ := json.Marshal(payload)
-	payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadJSON)
-
-	signature := base64.RawURLEncoding.EncodeToString([]byte("demo-signature"))
-
-	token := fmt.Sprintf("%s.%s.%s", headerEncoded, payloadEncoded, signature)
-	return token, nil
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(secret))
 }
 
-func JWTAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "missing authorization header", http.StatusUnauthorized)
-			return
-		}
-
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			http.Error(w, "invalid authorization header format", http.StatusUnauthorized)
-			return
-		}
-
-		token := parts[1]
-		claims, err := parseJWT(token)
-		if err != nil {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		ctx := context.WithValue(r.Context(), UserContextKey, claims)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	}
-}
-
-func parseJWT(token string) (*UserClaims, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, http.ErrNotSupported
-	}
-
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, err
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return nil, err
-	}
-
-	claims := &UserClaims{}
-
-	if id, ok := payload["id"].(string); ok {
-		claims.ID = id
-	}
-
-	return claims, nil
-}
-
-func GetUserClaims(r *http.Request) *UserClaims {
-	claims, ok := r.Context().Value(UserContextKey).(*UserClaims)
-	if !ok {
-		return nil
-	}
-	return claims
+func GetUserID(r *http.Request) (string, bool) {
+	userID, ok := r.Context().Value(UserContextKey).(string)
+	return userID, ok
 }
