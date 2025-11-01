@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -62,22 +61,6 @@ func (am *AuthMiddleware) Verify(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), UserContextKey, claims.ID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-func GenerateJWT(userID string, secret string) (string, error) {
-	claims := CustomClaims{
-		ID: userID,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
-			Issuer:    "chat-microservice",
-			Subject:   userID,
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(secret))
 }
 
 func GetUserID(r *http.Request) (string, bool) {
