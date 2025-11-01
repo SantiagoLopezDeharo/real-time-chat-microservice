@@ -4,9 +4,9 @@ A production-ready, scalable Go microservice for real-time chat with support for
 
 ## 🛠️ Tech Stack
 
-| Golang | MongoDB | Docker | WebSocket |
-| ------ | ------ | ---------- | --------- |
-| <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/go.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/mongodb.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/docker.png"> | 🔌 |
+| Golang | MongoDB | Docker | 
+| ------ | ------ | ---------- | 
+| <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/go.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/mongodb.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/docker.png"> |
 
 
 ## ✨ Key Features
