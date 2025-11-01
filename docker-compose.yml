@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: chat-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-chatdb}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    networks:
+      - chat-network
+
+  chat-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chat-microservice
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: ${MONGO_DB:-chatdb}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-messages}
+      RETRY_ATTEMPTS: ${RETRY_ATTEMPTS:-5}
+      PORT: ${PORT:-8080}
+      JWT_SECRET: ${JWT_SECRET}
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    depends_on:
+      - mongodb
+    networks:
+      - chat-network
+
+volumes:
+  mongodb_data:
+    driver: local
+  mongodb_config:
+    driver: local
+
+networks:
+  chat-network:
+    driver: bridge
