@@ -28,6 +28,8 @@ services:
       RETRY_ATTEMPTS: ${RETRY_ATTEMPTS:-5}
       PORT: ${PORT:-8080}
       JWT_SECRET: ${JWT_SECRET}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-5}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-10}
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     depends_on:

@@ -38,8 +38,8 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
-	claims := middleware.GetUserClaims(r)
-	if claims == nil {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -50,7 +50,7 @@ func (h *Handler) HandleWebsocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := ws.NewClient(conn, h.svc.Hub(), claims.ID)
+	client := ws.NewClient(conn, h.svc.Hub(), userID)
 	client.Start()
 }
 
@@ -60,8 +60,8 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := middleware.GetUserClaims(r)
-	if claims == nil {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -80,13 +80,13 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !models.ContainsUser(payload.Participants, claims.ID) {
+	if !models.ContainsUser(payload.Participants, userID) {
 		http.Error(w, "forbidden: sender must be part of participants", http.StatusForbidden)
 		return
 	}
 
 	msg := &models.Message{
-		Sender:       claims.ID,
+		Sender:       userID,
 		Content:      payload.Content,
 		CreatedAt:    time.Now(),
 		Participants: payload.Participants,
@@ -107,8 +107,8 @@ func (h *Handler) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := middleware.GetUserClaims(r)
-	if claims == nil {
+	userID, ok := middleware.GetUserID(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -143,7 +143,7 @@ func (h *Handler) HandleGetMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	messages, err := h.svc.GetMessagesForChannelWithPagination(participants, claims.ID, page, size)
+	messages, err := h.svc.GetMessagesForChannelWithPagination(participants, userID, page, size)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

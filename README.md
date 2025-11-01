@@ -367,17 +367,9 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for scaling strategies.
 
 ## 🔒 Security Notes
 
-⚠️ **Current JWT implementation is for demo purposes only!**
-
 For production:
-- [ ] Verify JWT signatures (use proper JWT library)
-- [ ] Add rate limiting per user
-- [ ] Sanitize message content
-- [ ] Implement proper CORS policy
-- [ ] Add message size limits
 - [ ] Use TLS/WSS for WebSocket
 - [ ] Add authentication service integration
-- [ ] Implement user blocking/reporting
 
 ## 🤝 Contributing
 
