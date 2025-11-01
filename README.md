@@ -1,163 +1,374 @@
-# Real-time Chat Microservice (minimal scaffold)
+# Real-Time Chat Microservice
 
-This repository is a Golang Plug And Play micro-service to managing real time chat system with one on one clients and groups of them.
+A production-ready, scalable Go microservice for real-time chat with support for one-on-one conversations and group chats. Built with WebSocket for instant messaging and MongoDB for persistent storage.
 
-## Tech Stack
+## 🛠️ Tech Stack
 
-| Golang | MongoDB | Docker |
-| ------ | ------ | ---------- |
-| <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/go.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/mongodb.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/docker.png"> |
+| Golang | MongoDB | Docker | WebSocket |
+| ------ | ------ | ---------- | --------- |
+| <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/go.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/mongodb.png"> | <img height="60" src="https://raw.githubusercontent.com/marwin1991/profile-technology-icons/refs/heads/main/icons/docker.png"> | 🔌 |
 
 
-Structure highlights:
-- `cmd/server` - application entrypoint
-- `internal/httpapi` - HTTP handlers (REST & WebSocket upgrade)
-- `internal/ws` - websocket hub and client management with channel support
-- `internal/service` - business logic that wires hub and repository
-- `internal/repository` - MongoDB repository implementation
-- `internal/middleware` - JWT authentication and authorization
-- `pkg/models` - shared domain models
+## ✨ Key Features
 
-Prerequisites:
+- 🚀 **Participant-Based Channels**: Channels are defined by participant user IDs - no arbitrary channel IDs needed
+- 🔌 **Efficient WebSocket**: Single connection per user receives messages from all channels
+- 🎯 **Smart Broadcasting**: Sender doesn't receive their own messages (prevents duplicates)
+- 💾 **Async Persistence**: Messages broadcast immediately, saved to MongoDB with retry logic
+- 🔐 **JWT Authentication**: Secure user identification with clean authorization model
+- 📊 **Scalable Architecture**: Modular design ready for horizontal scaling
+- 🐳 **Docker Ready**: Complete Docker Compose setup with MongoDB volumes
 
-- Go 1.22+ (for local development)
-- Docker and Docker Compose (for containerized deployment)
-- MongoDB instance running (local or remote, or use Docker Compose)
+## 🏗️ Architecture
 
-Environment Variables:
+### Channel Model
+Channels are identified by the set of participants (user IDs):
+- **One-on-One**: `["alice", "bob"]`
+- **Group Chat**: `["alice", "bob", "charlie"]`
+- **Order Independent**: `["alice", "bob"]` = `["bob", "alice"]` (automatically sorted)
+
+### WebSocket Model
+- User connects once: `GET /ws`
+- Receives messages from ALL channels they're part of
+- Much more efficient than one connection per channel
+
+### Broadcasting Logic
+- Message sent via REST API → Broadcast to all participants except sender → Async persist to MongoDB
+- Sender sees message immediately in UI (optimistic update)
+- Other participants receive via WebSocket in real-time
+
+## 📁 Project Structure
+
+```
+.
+├── cmd/server/          # Application entrypoint
+├── internal/
+│   ├── httpapi/        # HTTP & WebSocket handlers
+│   ├── ws/             # WebSocket hub (user-based connection management)
+│   ├── service/        # Business logic layer
+│   ├── repository/     # MongoDB persistence with retry
+│   └── middleware/     # JWT authentication
+├── pkg/models/         # Domain models (Message structure)
+├── demo/               # Node.js CLI demo client
+├── docker-compose.yml  # Docker services configuration
+└── Dockerfile          # Multi-stage Go build
+
+```
+
+## 🚀 Quick Start
+
+### Option 1: Docker Compose (Recommended)
 
 ```bash
+# Clone and start
+docker-compose up --build
+
+# The service is now running at:
+# HTTP: http://localhost:8080
+# WebSocket: ws://localhost:8080/ws
+```
+
+### Option 2: Local Development
+
+```bash
+# Start MongoDB
+docker run -d -p 27017:27017 --name mongodb mongo:7.0
+
+# Configure environment
+export MONGO_URI="mongodb://localhost:27017"
+export MONGO_DB="chatdb"
+export MONGO_COLLECTION="messages"
+
+# Run the server
+go run cmd/server/main.go
+```
+
+### Try the Demo Client
+
+```bash
+cd demo
+npm install
+node index.js
+```
+
+See [QUICKSTART.md](./QUICKSTART.md) for detailed examples!
+
+## 📡 API Endpoints
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/health` | No | Service health check |
+| GET | `/ws` | JWT | WebSocket connection (all channels) |
+| POST | `/api/messages` | JWT | Send message to channel |
+| GET | `/api/messages/get` | JWT | Get channel messages (with pagination) |
+| POST | `/api/connections` | No | Check user connection counts |
+
+### Pagination Support
+
+The GET messages endpoint supports pagination for efficient message retrieval:
+
+**Query Parameters:**
+- `participants` (required): Comma-separated user IDs
+- `page` (optional): Page number, 0-indexed (default: 0)
+- `size` (optional): Messages per page (default: 50, max: 100)
+
+**Formula:** `offset = page × size`
+
+Messages are always sorted by **newest first** (descending `created_at`).
+
+## 🔑 Authentication
+
+### JWT Token Structure
+
+```json
+{
+  "id": "alice",
+  "iat": 1730380800,
+  "exp": 1730467200
+}
+```
+
+**Note**: No `groups` field needed! Authorization is based on participant lists.
+
+### Authorization Rules
+
+- **Send Message**: User must be in the `participants` array
+- **Read Messages**: User must be in the `participants` array  
+- **WebSocket**: Connects with user ID, receives from all channels they're in
+
+## 💬 Usage Examples
+
+### Send a Message
+
+```bash
+curl -X POST http://localhost:8080/api/messages \
+  -H "Authorization: Bearer YOUR_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "participants": ["alice", "bob"],
+    "content": "Hello Bob!"
+  }'
+```
+
+### Get Messages
+
+```bash
+# Get latest 50 messages (default)
+curl -X GET "http://localhost:8080/api/messages/get?participants=alice,bob" \
+  -H "Authorization: Bearer YOUR_JWT"
+
+# Get first 20 messages (latest)
+curl -X GET "http://localhost:8080/api/messages/get?participants=alice,bob&page=0&size=20" \
+  -H "Authorization: Bearer YOUR_JWT"
+
+# Get next 20 messages (older)
+curl -X GET "http://localhost:8080/api/messages/get?participants=alice,bob&page=1&size=20" \
+  -H "Authorization: Bearer YOUR_JWT"
+```
+
+### Check Who's Online
+
+```bash
+curl -X POST http://localhost:8080/api/connections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "users": ["alice", "bob", "charlie"]
+  }'
+```
+
+Response:
+```json
+{
+  "alice": 2,
+  "bob": 1,
+  "charlie": 0
+}
+```
+
+### WebSocket (JavaScript Example)
+
+```javascript
+const ws = new WebSocket('ws://localhost:8080/ws', {
+  headers: { 'Authorization': 'Bearer YOUR_JWT' }
+});
+
+ws.on('message', (data) => {
+  const msg = JSON.parse(data);
+  console.log(`Channel [${msg.participants.join(', ')}]`);
+  console.log(`${msg.sender}: ${msg.content}`);
+});
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+```bash
+# MongoDB Configuration
 MONGO_URI=mongodb://localhost:27017
 MONGO_DB=chatdb
 MONGO_COLLECTION=messages
-RETRY_ATTEMPTS=5
+
+# Server Configuration
 PORT=8080
+RETRY_ATTEMPTS=5  # Message persistence retry count
+
+# JWT (for demo only)
 JWT_SECRET=your-jwt-secret
 ```
 
-- `RETRY_ATTEMPTS`: Maximum number of retry attempts for message persistence (default: 5)
+### Docker Volumes
 
-## Running with Docker Compose (Recommended)
+- `mongodb_data`: MongoDB database files
+- `mongodb_config`: MongoDB configuration
 
-1. Make sure Docker and Docker Compose are installed
+## 📊 Message Format
 
-2. Configure your `.env` file with desired values
+### Sent via API
 
-3. Start the services:
-
-```bash
-docker-compose up -d
+```json
+{
+  "participants": ["alice", "bob", "charlie"],
+  "content": "Hello everyone!"
+}
 ```
 
-4. View logs:
+### Received via WebSocket
+
+```json
+{
+  "id": "507f1f77bcf86cd799439011",
+  "sender": "alice",
+  "content": "Hello everyone!",
+  "participants": ["alice", "bob", "charlie"],
+  "created_at": "2025-10-31T10:30:45Z"
+}
+```
+
+## 🎯 Key Behaviors
+
+1. **Order Independence**: `["alice", "bob"]` and `["bob", "alice"]` are the same channel
+2. **No Echo**: Sender doesn't receive their own message via WebSocket
+3. **Single Connection**: One WebSocket per user handles all channels
+4. **Broadcast First**: Messages sent to WebSocket immediately, then persisted async
+5. **Retry Logic**: Failed MongoDB saves retry with exponential backoff
+
+## 📚 Documentation
+
+- [**QUICKSTART.md**](./QUICKSTART.md) - Get up and running in 5 minutes
+- [**ARCHITECTURE.md**](./ARCHITECTURE.md) - Deep dive into system design
+- [**PAGINATION.md**](./PAGINATION.md) - Complete pagination guide with examples
+- [**MIGRATION.md**](./MIGRATION.md) - Upgrading from channel-ID-based systems
+- [**demo/README.md**](./demo/README.md) - Demo client usage guide
+
+## 🧪 Testing
+
+### Multi-User Chat Test
+
+**Terminal 1 (Alice)**:
+```bash
+cd demo && node index.js
+# User: alice
+# Option 1: Connect WebSocket
+```
+
+**Terminal 2 (Bob)**:
+```bash
+cd demo && node index.js
+# User: bob
+# Option 2: Send message
+# Participants: alice, bob
+# Message: Hi Alice!
+```
+
+Alice's terminal will show:
+```
+[10:30:45] Channel [alice, bob]
+  bob: Hi Alice!
+```
+
+## 🔧 Development
+
+### Build
 
 ```bash
+go build ./...
+```
+
+### Run Tests (when implemented)
+
+```bash
+go test ./...
+```
+
+### View Logs
+
+```bash
+# Docker
 docker-compose logs -f chat-api
+
+# Local
+# Logs output to stdout
 ```
 
-5. Stop the services:
+### MongoDB Shell
 
 ```bash
-docker-compose down
+docker exec -it real-time-chat-microservice-mongodb-1 mongosh
+
+use chatdb
+db.messages.find().pretty()
 ```
 
-6. Stop and remove volumes (clears database):
+## 🚀 Production Considerations
 
-```bash
-docker-compose down -v
-```
+### Current Implementation
+- Single instance
+- In-memory connection management
+- MongoDB for persistence
 
-## Running Locally
+### For Multi-Instance Deployment
+1. Add **Redis Pub/Sub** for cross-instance messaging
+2. Implement **sticky sessions** or connection affinity
+3. Use **Redis** for shared connection registry
+4. Consider **message queue** for reliable delivery
 
-1. Start MongoDB:
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for scaling strategies.
 
-```bash
-docker run -d -p 27017:27017 --name mongodb mongo:latest
-```
+## 🔒 Security Notes
 
-2. Build and run:
+⚠️ **Current JWT implementation is for demo purposes only!**
 
-```bash
-export $(cat .env | xargs)
-go run ./cmd/server
-```
+For production:
+- [ ] Verify JWT signatures (use proper JWT library)
+- [ ] Add rate limiting per user
+- [ ] Sanitize message content
+- [ ] Implement proper CORS policy
+- [ ] Add message size limits
+- [ ] Use TLS/WSS for WebSocket
+- [ ] Add authentication service integration
+- [ ] Implement user blocking/reporting
 
-## Endpoints:
-- `GET /health` - health check (no auth required)
-- `GET /ws?channel=<channel_id>` - WebSocket endpoint (requires JWT, user must have access to channel)
-- `POST /api/messages/<channel_id>` - send message via REST (requires JWT, user must have access to channel)
-- `GET /api/messages/<channel_id>` - get messages from channel (requires JWT, filtered by access rules)
-- `GET /api/messages/counts` - get connected client counts for multiple channels (no auth required)
+## 🤝 Contributing
 
-JWT Authentication:
+Contributions welcome! Please:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests (when test suite exists)
+5. Submit a pull request
 
-All protected endpoints require a JWT token in the Authorization header:
-```
-Authorization: Bearer <jwt_token>
-```
+## 📄 License
 
-The JWT payload must contain:
-- `id` (string): user identifier, used as message sender
-- `groups` (array of strings): group identifiers the user belongs to
+[MIT License](./LICENSE)
 
-Channel Access Rules:
-- A user can access a channel if their `id` matches the channel ID
-- OR if any of their `groups` contains the channel ID
+## 🙏 Acknowledgments
 
-Message Retrieval Rules (GET /api/messages/<channel_id>):
-- If user's `id` or any `groups` match the `channel_id`: returns ALL messages from that channel
-- Otherwise: returns only messages where the user is the sender OR where the channel matches their ID/groups
+Built with:
+- [gorilla/websocket](https://github.com/gorilla/websocket) - WebSocket implementation
+- [MongoDB Go Driver](https://github.com/mongodb/mongo-go-driver) - MongoDB client
+- [Docker](https://www.docker.com/) - Containerization
 
-Example JWT payload:
-```json
-{
-  "id": "user123",
-  "groups": ["group1", "group2"],
-  "other": "fields are ignored"
-}
-```
+---
 
-Message Format:
-```json
-{
-  "content": "message text"
-}
-```
-
-The `sender` field is automatically set from the JWT `id` claim.
-
-Client Count Request:
-```json
-{
-  "channels": ["channel1", "channel2", "channel3"]
-}
-```
-
-Client Count Response:
-```json
-{
-  "channel1": 5,
-  "channel2": 0,
-  "channel3": 12
-}
-```
-
-Notes:
-- MongoDB is used for persistent message storage
-- MongoDB data is persisted in Docker volumes (`mongodb_data` and `mongodb_config`)
-- Messages are broadcast immediately via WebSocket for minimal latency
-- Message persistence happens asynchronously in a separate goroutine to avoid blocking broadcasts
-- Failed persistence operations are retried up to the configured number of attempts with exponential backoff
-- Messages are stored with timestamps and indexed by channel
-- WebSocket messages are JSON matching the `models.Message` structure
-- JWT verification is limited to parsing; signature validation should be handled by an upstream service
-- The service supports horizontal scaling as long as all instances connect to the same MongoDB instance
-
-## Docker Services
-
-The Docker Compose setup includes:
-- **chat-api**: The Go microservice running on port 8080 (configurable)
-- **mongodb**: MongoDB 7.0 instance with persistent volumes
-- **chat-network**: Bridge network for service communication
-- **mongodb_data**: Volume for MongoDB data persistence
-- **mongodb_config**: Volume for MongoDB configuration
+**Need help?** Check out the documentation or open an issue!

@@ -15,8 +15,7 @@ const (
 )
 
 type UserClaims struct {
-	ID     string   `json:"id"`
-	Groups []string `json:"groups"`
+	ID string `json:"id"`
 }
 
 func JWTAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -67,14 +66,6 @@ func parseJWT(token string) (*UserClaims, error) {
 		claims.ID = id
 	}
 
-	if groups, ok := payload["groups"].([]interface{}); ok {
-		for _, g := range groups {
-			if groupStr, ok := g.(string); ok {
-				claims.Groups = append(claims.Groups, groupStr)
-			}
-		}
-	}
-
 	return claims, nil
 }
 
@@ -84,22 +75,4 @@ func GetUserClaims(r *http.Request) *UserClaims {
 		return nil
 	}
 	return claims
-}
-
-func CanAccessChannel(claims *UserClaims, channelID string) bool {
-	if claims == nil {
-		return false
-	}
-
-	if claims.ID == channelID {
-		return true
-	}
-
-	for _, group := range claims.Groups {
-		if group == channelID {
-			return true
-		}
-	}
-
-	return false
 }

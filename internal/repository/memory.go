@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"log"
+	"sort"
 	"time"
 
 	"chat-microservice/pkg/models"
@@ -16,8 +17,8 @@ type Repository interface {
 	Save(*models.Message) error
 	SaveAsync(*models.Message, int)
 	List() []*models.Message
-	GetMessagesByChannel(channelID string) ([]*models.Message, error)
-	GetMessagesForUser(userID string, groups []string) ([]*models.Message, error)
+	GetMessagesByParticipants(participants []string) ([]*models.Message, error)
+	GetMessagesByParticipantsWithPagination(participants []string, page int, size int) ([]*models.Message, error)
 }
 
 type MongoRepository struct {
@@ -39,12 +40,24 @@ func NewMongoRepository(mongoURI, database, collection string) (*MongoRepository
 
 	coll := client.Database(database).Collection(collection)
 
+	// Create index on participants array for efficient querying
+	indexModel := mongo.IndexModel{
+		Keys: bson.D{{Key: "participants", Value: 1}},
+	}
+	_, err = coll.Indexes().CreateOne(ctx, indexModel)
+	if err != nil {
+		log.Printf("warning: failed to create index on participants: %v", err)
+	}
+
 	return &MongoRepository{collection: coll}, nil
 }
 
 func (m *MongoRepository) Save(msg *models.Message) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// Ensure participants are sorted before saving
+	sort.Strings(msg.Participants)
 
 	_, err := m.collection.InsertOne(ctx, msg)
 	return err
@@ -68,11 +81,20 @@ func (m *MongoRepository) List() []*models.Message {
 	return messages
 }
 
-func (m *MongoRepository) GetMessagesByChannel(channelID string) ([]*models.Message, error) {
+// GetMessagesByParticipants retrieves all messages for a channel identified by its participants
+// The participants array should be sorted before calling this method
+func (m *MongoRepository) GetMessagesByParticipants(participants []string) ([]*models.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	filter := bson.M{"channel_id": channelID}
+	// Ensure participants are sorted
+	sorted := make([]string, len(participants))
+	copy(sorted, participants)
+	sort.Strings(sorted)
+
+	// Query for exact match of participants array (order-independent due to sorting)
+	filter := bson.M{"participants": sorted}
+
 	cursor, err := m.collection.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
 	if err != nil {
 		return nil, err
@@ -87,20 +109,33 @@ func (m *MongoRepository) GetMessagesByChannel(channelID string) ([]*models.Mess
 	return messages, nil
 }
 
-func (m *MongoRepository) GetMessagesForUser(userID string, groups []string) ([]*models.Message, error) {
+// GetMessagesByParticipantsWithPagination retrieves messages with pagination
+// Messages are sorted by created_at descending (latest first)
+// page: page number (0-indexed)
+// size: number of messages per page
+// offset = size * page
+func (m *MongoRepository) GetMessagesByParticipantsWithPagination(participants []string, page int, size int) ([]*models.Message, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	allIDs := append([]string{userID}, groups...)
+	// Ensure participants are sorted
+	sorted := make([]string, len(participants))
+	copy(sorted, participants)
+	sort.Strings(sorted)
 
-	filter := bson.M{
-		"$or": []bson.M{
-			{"sender": userID},
-			{"channel_id": bson.M{"$in": allIDs}},
-		},
-	}
+	// Calculate offset
+	offset := int64(size * page)
 
-	cursor, err := m.collection.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}))
+	// Query for exact match of participants array (order-independent due to sorting)
+	filter := bson.M{"participants": sorted}
+
+	// Sort by created_at descending (latest first), skip offset, limit by size
+	findOptions := options.Find().
+		SetSort(bson.D{{Key: "created_at", Value: -1}}).
+		SetSkip(offset).
+		SetLimit(int64(size))
+
+	cursor, err := m.collection.Find(ctx, filter, findOptions)
 	if err != nil {
 		return nil, err
 	}

@@ -25,10 +25,10 @@ function displayBanner() {
 
 function displayMenu() {
   console.log('\n--- Main Menu ---');
-  console.log('1. Connect to channel (WebSocket)');
-  console.log('2. Send message (REST API)');
-  console.log('3. Get messages from channel');
-  console.log('4. Get client counts');
+  console.log('1. Connect to WebSocket (receive all messages)');
+  console.log('2. Send message to a channel');
+  console.log('3. Get messages from a channel');
+  console.log('4. Get user connection counts');
   console.log('5. Health check');
   console.log('6. Exit');
   console.log('');
@@ -36,36 +36,31 @@ function displayMenu() {
 
 async function setupUser() {
   console.log('\n--- User Setup ---');
-  console.log('Note: You can send messages to any channel.');
-  console.log('To READ messages or SUBSCRIBE to a channel, your user ID or groups must match the channel ID.');
-  console.log('Example: User ID "alice" with groups ["2", "3"] can read/subscribe to channels: alice, 2, 3\n');
+  console.log('Note: Channels are identified by participant user IDs.');
+  console.log('Example: A channel between "alice" and "bob" = ["alice", "bob"]');
+  console.log('Group chat: ["alice", "bob", "charlie"]\n');
   
   const userId = await question('Enter your user ID: ');
-  const groupsInput = await question('Enter your groups (comma-separated, or press Enter for none): ');
-  const groups = groupsInput ? groupsInput.split(',').map(g => g.trim()) : [];
   
-  const token = createToken(userId, groups);
+  const token = createToken(userId);
   console.log(`\n✓ JWT Token generated for user: ${userId}`);
-  if (groups.length > 0) {
-    console.log(`  Groups: ${groups.join(', ')}`);
-  }
-  console.log(`  Can read/subscribe to channels: ${userId}${groups.length > 0 ? ', ' + groups.join(', ') : ''}`);
   
-  return { userId, groups, token };
+  return { userId, token };
 }
 
-async function connectToChannel(token, userId, groups) {
-  const channelId = await question('\nEnter channel ID to connect: ');
-  
-  const wsClient = new ChatWebSocketClient(SERVER_WS, token, channelId);
+async function connectToWebSocket(token, userId) {
+  const wsClient = new ChatWebSocketClient(SERVER_WS, token);
   
   wsClient.onMessage((message) => {
-    console.log(`\n[${new Date(message.created_at).toLocaleTimeString()}] ${message.sender}: ${message.content}`);
+    const participants = message.participants.join(', ');
+    console.log(`\n[${new Date(message.created_at).toLocaleTimeString()}] Channel [${participants}]`);
+    console.log(`  ${message.sender}: ${message.content}`);
   });
   
   try {
     await wsClient.connect();
-    console.log('\nListening for messages... (Press Ctrl+C to disconnect)');
+    console.log(`\n✓ WebSocket connected for user: ${userId}`);
+    console.log('Listening for all messages... (Press Ctrl+C to disconnect)');
     
     process.on('SIGINT', () => {
       console.log('\n\nDisconnecting...');
@@ -75,25 +70,28 @@ async function connectToChannel(token, userId, groups) {
     
     await new Promise(() => {});
   } catch (error) {
-    if (error.message.includes('403') || error.message.includes('forbidden')) {
-      console.error(`Failed to connect: forbidden`);
-      console.error(`  Your user ID (${userId}) or groups [${groups.join(', ')}] don't match channel "${channelId}"`);
-      console.error(`  Tip: Add "${channelId}" to your groups during setup to access this channel`);
-    } else {
-      console.error(`Failed to connect: ${error.message}`);
-    }
+    console.error(`Failed to connect: ${error.message}`);
   }
 }
 
-async function sendMessage(token, userId, groups) {
+async function sendMessage(token, userId) {
   const restClient = new ChatRestClient(SERVER_HTTP, token);
   
-  const channelId = await question('\nEnter channel ID: ');
+  const participantsInput = await question('\nEnter participant user IDs (comma-separated, including yourself): ');
+  const participants = participantsInput.split(',').map(p => p.trim());
+  
+  // Verify user is in participants
+  if (!participants.includes(userId)) {
+    console.error(`✗ You must be a participant in the channel. Add "${userId}" to the list.`);
+    return;
+  }
+  
   const content = await question('Enter message: ');
   
   try {
-    await restClient.sendMessage(channelId, content);
+    await restClient.sendMessage(participants, content);
     console.log('✓ Message sent successfully');
+    console.log(`  Channel: [${participants.join(', ')}]`);
   } catch (error) {
     console.error(`✗ ${error.message}`);
   }
@@ -102,30 +100,44 @@ async function sendMessage(token, userId, groups) {
 async function getMessages(token) {
   const restClient = new ChatRestClient(SERVER_HTTP, token);
   
-  const channelId = await question('\nEnter channel ID: ');
+  const participantsInput = await question('\nEnter participant user IDs (comma-separated): ');
+  const participants = participantsInput.split(',').map(p => p.trim());
+  
+  const pageInput = await question('Enter page number (default 0): ');
+  const page = pageInput ? parseInt(pageInput, 10) : 0;
+  
+  const sizeInput = await question('Enter page size (default 50, max 100): ');
+  const size = sizeInput ? parseInt(sizeInput, 10) : 50;
   
   try {
-    const messages = await restClient.getMessages(channelId);
-    console.log(`\n✓ Retrieved ${messages.length} messages:\n`);
+    const messages = await restClient.getMessages(participants, page, size);
+    console.log(`\n✓ Retrieved ${messages.length} messages from channel [${participants.join(', ')}]`);
+    console.log(`  (Page ${page}, Size ${size}, Offset ${page * size})\n`);
     messages.forEach((msg, idx) => {
       console.log(`${idx + 1}. [${new Date(msg.created_at).toLocaleString()}] ${msg.sender}: ${msg.content}`);
     });
+    
+    if (messages.length === 0) {
+      console.log('  No messages found on this page.');
+    } else if (messages.length < size) {
+      console.log(`\n  (Last page - only ${messages.length} messages)`);
+    }
   } catch (error) {
     console.error(`✗ ${error.message}`);
   }
 }
 
-async function getClientCounts() {
+async function getUserConnections() {
   const restClient = new ChatRestClient(SERVER_HTTP, '');
   
-  const channelsInput = await question('\nEnter channel IDs (comma-separated): ');
-  const channels = channelsInput.split(',').map(c => c.trim());
+  const usersInput = await question('\nEnter user IDs (comma-separated): ');
+  const users = usersInput.split(',').map(u => u.trim());
   
   try {
-    const counts = await restClient.getClientCounts(channels);
-    console.log('\n✓ Client counts:');
-    Object.entries(counts).forEach(([channel, count]) => {
-      console.log(`  ${channel}: ${count} client(s)`);
+    const counts = await restClient.getUserConnections(users);
+    console.log('\n✓ User connection counts:');
+    Object.entries(counts).forEach(([user, count]) => {
+      console.log(`  ${user}: ${count} connection(s)`);
     });
   } catch (error) {
     console.error(`✗ ${error.message}`);
@@ -148,7 +160,7 @@ async function healthCheck() {
 async function main() {
   displayBanner();
   
-  const { userId, groups, token } = await setupUser();
+  const { userId, token } = await setupUser();
   
   let running = true;
   
@@ -158,16 +170,16 @@ async function main() {
     
     switch (choice) {
       case '1':
-        await connectToChannel(token, userId, groups);
+        await connectToWebSocket(token, userId);
         break;
       case '2':
-        await sendMessage(token, userId, groups);
+        await sendMessage(token, userId);
         break;
       case '3':
         await getMessages(token);
         break;
       case '4':
-        await getClientCounts();
+        await getUserConnections();
         break;
       case '5':
         await healthCheck();
