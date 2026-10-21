@@ -91,7 +91,7 @@ go run ./cmd/server
 
 ### Demo client
 
-[`demo/`](demo) contains an interactive Node.js CLI (Node 18+) that mints a token for a user ID you type, then lets you open a WebSocket, send messages, read history, query connection counts and check health. It signs tokens with the hard-coded secret `your-jwt-secret`, so start the server with `JWT_SECRET=your-jwt-secret` when using it. `SERVER_HTTP` and `SERVER_WS` override the default `http://localhost:8080` and `ws://localhost:8080`.
+[`demo/`](demo) contains an interactive Node.js CLI (Node 18+) that mints a token for a user ID you type, then lets you open a WebSocket, send messages, read history, query connection counts and check health. It signs tokens with the hard-coded secret `your-jwt-secret`, so start the server with `JWT_SECRET=your-jwt-secret` when using it. `SERVER_HTTP` and `SERVER_WS` override the default `http://localhost:8080` and `ws://localhost:8080`. See [demo/README.md](demo/README.md) for the full menu and troubleshooting.
 
 ```bash
 cd demo
@@ -125,13 +125,15 @@ flowchart LR
 
 **Sending.** The sender always comes from the JWT, never from the request body, and must be one of the participants. The service builds the message (new ObjectID, UTC timestamp truncated to milliseconds), puts it on the persistence queue without blocking, then queues it on every connection of every recipient. If the queue is full the request fails with `503` before anything is delivered. The sender is excluded from the broadcast, including the sender's other tabs, so clients render their own messages from the `202` response. A message whose only participant is the sender (a note to self) is stored but not delivered.
 
-**Persistence.** Each of the 4 workers takes one message from the queue, drains whatever else is already queued (up to 256 messages) and writes the batch with a single unordered `InsertMany`. A failed batch is retried up to `RETRY_ATTEMPTS` times with linear backoff (100 ms × attempt, 5 s timeout per attempt). Because IDs are assigned before the first attempt, duplicate-key errors on a retry mean the document is already stored and count as success. A batch that still fails after the last attempt is logged and dropped.
+**Persistence.** Each of the 4 workers takes one message from the queue, drains whatever else is already queued (up to 256 messages) and writes the batch with a single unordered `InsertMany`. A failed batch is attempted up to `RETRY_ATTEMPTS` times in total with linear backoff (100 ms × attempt, 5 s timeout per attempt). Because IDs are assigned before the first attempt, duplicate-key errors on a retry mean the document is already stored and count as success. A batch that still fails after the last attempt is logged and dropped.
 
 **WebSockets.** The hub maps each user ID to its open connections. Broadcasts run on the sending request's goroutine under a read lock, so concurrent senders fan out in parallel. Each connection has a byte-bounded outbound queue; a writer goroutine exists only while there is something to write and pings are timer driven, so an idle connection costs one parked reader goroutine. Inbound frames are read and discarded: the socket is receive-only.
 
 **Shutdown.** On `SIGINT` or `SIGTERM` the server stops accepting HTTP requests, closes every WebSocket with `1001`, closes the persistence queue and waits for the workers to write what is left, then disconnects from MongoDB, all within a 15 second budget.
 
 **Scaling limits.** Connection state and rate limit counters live in process memory, so one instance must hold every connection of the users in a conversation. Running several replicas would require cross-instance fan-out (for example a pub/sub layer) and shared rate limiting, which this service does not implement.
+
+[ARCHITECTURE.md](ARCHITECTURE.md) covers the send path, persistence workers, hub and writer model, shutdown order and design trade-offs in more depth.
 
 ## API reference
 

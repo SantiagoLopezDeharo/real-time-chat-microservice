@@ -1,152 +1,87 @@
 # Chat Demo Client
 
-This is a Node.js CLI demo client for testing the real-time chat microservice.
+An interactive Node.js CLI for trying the chat microservice by hand. It mints a JWT for any user ID you type and wraps every endpoint of the service in a menu.
 
-## Features
+## Requirements
 
-- **Self-signed JWT tokens** for authentication (for demo purposes only)
-- **WebSocket connections** to listen for real-time messages
-- **REST API** for sending messages and fetching data
-- **Interactive CLI menu** for easy testing
+- Node.js 18+
+- The chat microservice running locally (see the [main README](../README.md#quick-start))
 
-## Prerequisites
+The demo signs its tokens with the hard-coded secret `your-jwt-secret` ([`jwt.js`](jwt.js)), so the server must run with that secret or every authenticated call fails with `401`:
 
-- Node.js 18+ installed
-- Chat microservice running (via Docker Compose or locally)
+```bash
+export JWT_SECRET=your-jwt-secret
+docker compose up -d          # or: go run ./cmd/server
+```
 
-## Installation
+## Install and run
 
 ```bash
 cd demo
 npm install
+npm start                     # same as: node index.js
 ```
 
-## Configuration
-
-By default, the client connects to `localhost:8080`. You can override this with environment variables:
+By default the client talks to `http://localhost:8080` and `ws://localhost:8080`. Override them with:
 
 ```bash
 export SERVER_HTTP=http://localhost:8080
 export SERVER_WS=ws://localhost:8080
 ```
 
-## Running the Demo
-
-```bash
-npm start
-```
-
 ## Usage
 
-When you start the client, you'll be prompted to:
+At start the client asks for your user ID and generates an HS256 token with the claims `id`, `iat` and `exp` (valid for 24 hours). It then shows this menu:
 
-1. **Enter your user ID**: This will be your unique identifier (e.g., `alice`)
-2. **Enter your groups**: Comma-separated list of group IDs you belong to (e.g., `team-a,developers`)
+| Option | What it does |
+|--------|--------------|
+| 1. Connect to WebSocket | Opens `GET /ws` with the token and prints every message delivered to you, from any conversation. The terminal stays in listening mode; `Ctrl+C` closes the socket and exits the client |
+| 2. Send message | Asks for the participants (comma-separated, including yourself) and the content, then calls `POST /api/messages`. The client refuses locally if your ID is not in the list |
+| 3. Get messages | Asks for the participants, a page (default `0`) and a size (default `50`, the server caps it at `100`), then calls `GET /api/messages/get` and prints the page, newest first |
+| 4. Get user connection counts | Asks for user IDs and calls `POST /api/connections` (no token sent) |
+| 5. Health check | Calls `GET /health` and prints the status and server time |
+| 6. Exit | Quits |
 
-The client will generate a JWT token with these credentials.
+Server errors are printed with the server's plain-text body, for example `✗ forbidden: user must be part of participants`.
 
-### Main Menu Options
+## Example: two users
 
-**1. Connect to channel (WebSocket)**
-- Opens a WebSocket connection to listen for messages in real-time
-- You must have access to the channel (your ID or one of your groups must match the channel ID)
-- Press `Ctrl+C` to disconnect
+Since option 1 keeps the terminal listening, use one terminal per listener and another to send.
 
-**2. Send message (REST API)**
-- Sends a message to a channel via REST API
-- The message sender is automatically set from your JWT token
-- You must have access to the channel
+Terminal 1, listen as Alice:
 
-**3. Get messages from channel**
-- Retrieves message history from a channel
-- Returns messages based on your access rights:
-  - If you have full access: all channel messages
-  - Otherwise: only messages where you're the sender or have access
-
-**4. Get client counts**
-- Shows how many clients are connected to specific channels
-- No authentication required
-- Enter comma-separated channel IDs
-
-**5. Health check**
-- Checks if the server is running
-- No authentication required
-
-**6. Exit**
-- Closes the client
-
-## Example Scenarios
-
-### Testing Channel Access
-
-**User 1** (alice, groups: team-a)
 ```
-User ID: alice
-Groups: team-a
-```
-- Can access channels: `alice`, `team-a`
-- Can send/receive from these channels
-
-**User 2** (bob, groups: team-a,developers)
-```
-User ID: bob
-Groups: team-a,developers
-```
-- Can access channels: `bob`, `team-a`, `developers`
-
-### Multi-Client Chat
-
-1. Start the server:
-   ```bash
-   docker-compose up -d
-   ```
-
-2. Open terminal 1 - connect as Alice:
-   ```bash
-   npm start
-   # User ID: alice
-   # Groups: team-a
-   # Select: 1 (Connect to channel)
-   # Channel ID: team-a
-   ```
-
-3. Open terminal 2 - send as Bob:
-   ```bash
-   npm start
-   # User ID: bob
-   # Groups: team-a
-   # Select: 2 (Send message)
-   # Channel ID: team-a
-   # Message: Hello team!
-   ```
-
-4. Alice will see Bob's message in real-time!
-
-## JWT Token Structure
-
-The demo client generates tokens with this payload:
-
-```json
-{
-  "id": "alice",
-  "groups": ["team-a", "developers"],
-  "iat": 1234567890,
-  "exp": 1234654290
-}
+Enter your user ID: alice
+Select an option: 1
+✓ Connected to WebSocket
 ```
 
-**Note**: For production, tokens should be generated by a secure authentication service, not by the client!
+Terminal 2, send as Bob:
+
+```
+Enter your user ID: bob
+Select an option: 2
+Enter participant user IDs (comma-separated, including yourself): alice, bob
+Enter message: Hi Alice!
+✓ Message sent successfully
+```
+
+Terminal 1 prints:
+
+```
+[10:30:45] Channel [alice, bob]
+  bob: Hi Alice!
+```
+
+For a group, list more participants (`alice, bob, carol`): every listening recipient gets the message. The sender never receives their own message over the WebSocket, so a listener running as `bob` would print nothing for it.
 
 ## Troubleshooting
 
-**Connection refused**
-- Make sure the chat microservice is running
-- Check SERVER_HTTP and SERVER_WS environment variables
+| Symptom | Cause |
+|---------|-------|
+| `ECONNREFUSED` | The server is not running, or `SERVER_HTTP` / `SERVER_WS` point elsewhere |
+| `invalid token`, or `Failed to connect: Unexpected server response: 401` | The server's `JWT_SECRET` is not `your-jwt-secret`, or the user ID was left empty |
+| `forbidden: user must be part of participants` | You asked for the history of a conversation you are not part of |
+| `Too Many Requests` | Per-user rate limit (default 5 requests/s, burst 10) |
 
-**Forbidden error**
-- Your user ID or groups don't have access to the channel
-- Make sure your ID or one of your groups matches the channel ID
-
-**WebSocket closes immediately**
-- Check JWT token is valid
-- Ensure you have access to the channel
+The demo's secret and self-issued tokens are for local testing only; in production, tokens come from your authentication service.
