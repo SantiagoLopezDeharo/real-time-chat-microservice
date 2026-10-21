@@ -8,7 +8,7 @@ COSIGN_IDENTITY ?= santiagolhgpro@gmail.com
 COSIGN_ISSUER ?= https://accounts.google.com
 DIGEST = $(shell docker buildx imagetools inspect $(IMAGE):$(VERSION) --format '{{json .Manifest.Digest}}' | tr -d '"')
 
-.PHONY: test e2e e2e-short e2e-image perf bench scan docker-build docker-push sign verify
+.PHONY: test e2e e2e-short e2e-image perf bench pgo scan docker-build docker-push sign verify
 
 test:
 	go test -race ./...
@@ -27,6 +27,12 @@ perf:
 
 bench:
 	go test -run=^$$ -bench=. -benchmem ./...
+
+# Refreshes the profile-guided optimization profile from the perf suite's
+# CPU profiles; go build picks up cmd/server/default.pgo automatically.
+pgo:
+	E2E_PERF_LABEL=pgo go test -tags e2e -count=1 -run TestPerformance ./test/e2e/
+	go tool pprof -proto test/e2e/reports/pgo-cpu-*.pb.gz > cmd/server/default.pgo
 
 # Fails on any vulnerability reachable from our code, and on any fixable
 # critical or high vulnerability anywhere in the image.
