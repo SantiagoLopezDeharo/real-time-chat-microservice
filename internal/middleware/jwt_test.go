@@ -119,6 +119,66 @@ func TestVerifyRejects(t *testing.T) {
 	}
 }
 
+func verifyWithQuery(rawQuery, header string) result {
+	var res result
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		res.called = true
+		res.userID, _ = GetUserID(r)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/ws?"+rawQuery, nil)
+	if header != "" {
+		req.Header.Set("Authorization", header)
+	}
+	rec := httptest.NewRecorder()
+	AcceptQueryToken(NewAuthMiddleware(secret).Verify(next)).ServeHTTP(rec, req)
+	res.status, res.body = rec.Code, rec.Body.String()
+	return res
+}
+
+func TestAcceptQueryToken(t *testing.T) {
+	key := []byte(secret)
+	alice := sign(t, jwt.SigningMethodHS256, key, jwt.MapClaims{"id": "alice"})
+	bob := sign(t, jwt.SigningMethodHS256, key, jwt.MapClaims{"id": "bob"})
+	expired := sign(t, jwt.SigningMethodHS256, key, jwt.MapClaims{"id": "alice", "exp": time.Now().Add(-time.Minute).Unix()})
+	none := sign(t, jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, jwt.MapClaims{"id": "admin"})
+
+	tests := []struct {
+		name, query, header string
+		wantUser            string
+	}{
+		{"query token", "token=" + alice, "", "alice"},
+		{"header wins over query", "token=" + bob, "Bearer " + alice, "alice"},
+		{"bad header is not rescued by query", "token=" + alice, "Bearer garbage", ""},
+		{"forged query", "token=garbage", "", ""},
+		{"expired query", "token=" + expired, "", ""},
+		{"alg none query", "token=" + none, "", ""},
+		{"empty query", "token=", "", ""},
+		{"other parameter name", "access_token=" + alice, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := verifyWithQuery(tt.query, tt.header)
+			if tt.wantUser == "" {
+				if res.status != http.StatusUnauthorized || res.called {
+					t.Fatalf("status=%d called=%v; want 401 and no call", res.status, res.called)
+				}
+				return
+			}
+			if !res.called || res.userID != tt.wantUser {
+				t.Fatalf("called=%v user=%q status=%d; want user %q", res.called, res.userID, res.status, tt.wantUser)
+			}
+		})
+	}
+}
+
+func TestAcceptQueryTokenDoesNotMutateTheOriginalRequest(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws?token=abc", nil)
+	AcceptQueryToken(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), req)
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Errorf("original request header = %q", got)
+	}
+}
+
 func TestGetUserIDWithoutMiddleware(t *testing.T) {
 	if id, ok := GetUserID(httptest.NewRequest(http.MethodGet, "/", nil)); ok || id != "" {
 		t.Errorf("GetUserID = %q, %v", id, ok)

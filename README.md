@@ -145,7 +145,7 @@ flowchart LR
 | `GET` | `/api/messages/get` | JWT | Yes | Read a conversation's history, newest first |
 | `POST` | `/api/connections` | No | No | Count open WebSocket connections per user |
 
-Authenticated routes expect `Authorization: Bearer <jwt>`. JSON responses carry `Content-Type: application/json`; error responses are short plain-text bodies (for example `forbidden: user must be part of participants`) that never include internal details. Other methods on a known path get `405`, unknown paths `404`.
+Authenticated routes expect `Authorization: Bearer <jwt>`; `/ws` also accepts `?token=<jwt>`. JSON responses carry `Content-Type: application/json`; error responses are short plain-text bodies (for example `forbidden: user must be part of participants`) that never include internal details. Other methods on a known path get `405`, unknown paths `404`.
 
 ### `GET /health`
 
@@ -201,7 +201,15 @@ Pagination is offset based (`skip = page × size`), so messages arriving between
 
 ### `GET /ws`
 
-The upgrade request must carry `Authorization: Bearer <jwt>`. Browsers cannot set headers on a WebSocket handshake, so browser clients connect through a backend or proxy that attaches the header; native and server-side clients send it directly:
+The upgrade request must carry the JWT either as `Authorization: Bearer <jwt>` or as a `?token=<jwt>` query parameter. Browsers cannot set headers on a WebSocket handshake, so browser clients use the query parameter; native and server-side clients can send the header. If both are present, the header wins and the query parameter is ignored. The token is validated exactly the same way in both cases. `?token=` is accepted on `/ws` only: REST routes ignore it and still require the header.
+
+URLs end up in proxy, load balancer and access logs, so a token passed in the query string can be recorded. Give WebSocket tokens a short `exp` (for example a minute, minted right before connecting) and avoid logging full request URLs at your own proxies.
+
+```javascript
+const ws = new WebSocket(`ws://localhost:8080/ws?token=${encodeURIComponent(token)}`);
+```
+
+Native and server-side clients can use the header instead:
 
 ```javascript
 import WebSocket from 'ws';
@@ -257,7 +265,7 @@ curl -X POST http://localhost:8080/api/connections \
 | `200` | History, connection counts, health |
 | `202` | Message accepted for delivery and persistence |
 | `400` | Malformed or trailing JSON, missing or empty participant IDs, more than 1000 participants or users, blank content, missing `participants` query parameter, `page` above 10000, WebSocket route requested without an upgrade |
-| `401` | Missing or malformed `Authorization` header; forged, expired, not-yet-valid or non-HMAC token; token without an `id` claim |
+| `401` | Missing or malformed `Authorization` header (or `?token=` on `/ws`); forged, expired, not-yet-valid or non-HMAC token; token without an `id` claim |
 | `403` | The authenticated user is not one of the participants (sending or reading) |
 | `405` / `404` | Wrong method on a known path / unknown path |
 | `413` | Request body larger than `MAX_BODY_BYTES` |
@@ -287,7 +295,7 @@ Invalid values stop the service at startup with every problem reported at once, 
 
 ## Security model
 
-**Authentication.** Every route except `/health` and `/api/connections` requires `Authorization: Bearer <jwt>`. Tokens are verified with `JWT_SECRET` and only `HS256`, `HS384` and `HS512` are accepted, which rules out `alg: none` and RSA/HMAC confusion. The `id` claim is the user ID and must be present and non-blank. `exp` and `nbf` are enforced when present but not required, so issue short-lived tokens.
+**Authentication.** Every route except `/health` and `/api/connections` requires `Authorization: Bearer <jwt>`; `/ws` alone also accepts the token as a `?token=` query parameter, validated identically (see [`GET /ws`](#get-ws) for the log-exposure caveat). Tokens are verified with `JWT_SECRET` and only `HS256`, `HS384` and `HS512` are accepted, which rules out `alg: none` and RSA/HMAC confusion. The `id` claim is the user ID and must be present and non-blank. `exp` and `nbf` are enforced when present but not required, so issue short-lived tokens.
 
 ```json
 {"id": "alice", "iat": 1761053445, "exp": 1761139845}
@@ -308,7 +316,7 @@ Invalid values stop the service at startup with every problem reported at once, 
 | Inbound WebSocket frame | 512 bytes |
 | Outbound queue per WebSocket | 4 MiB, then closed with `1008` |
 
-**Origins.** The WebSocket upgrade accepts any `Origin`. That is safe here because authentication relies on the `Authorization` header, which a browser never attaches to a cross-site WebSocket handshake, rather than on cookies.
+**Origins.** The WebSocket upgrade accepts any `Origin`. That is safe here because authentication relies on an explicit token, either the `Authorization` header or the `?token=` parameter, which a browser never attaches to a cross-site WebSocket handshake on its own, rather than on cookies.
 
 **Deployment notes.**
 

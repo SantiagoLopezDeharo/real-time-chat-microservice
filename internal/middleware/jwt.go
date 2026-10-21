@@ -58,6 +58,19 @@ func (am *AuthMiddleware) Verify(next http.Handler) http.Handler {
 	})
 }
 
+// AcceptQueryToken lets a `?token=<jwt>` query parameter stand in for the
+// Authorization header, which browsers cannot set on a WebSocket handshake.
+// A request that already carries the header is left untouched.
+func AcceptQueryToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token := r.URL.Query().Get("token"); r.Header.Get("Authorization") == "" && token != "" {
+			r = r.Clone(r.Context())
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (am *AuthMiddleware) keyFunc(*jwt.Token) (any, error) {
 	return am.key, nil
 }

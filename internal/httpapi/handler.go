@@ -29,8 +29,9 @@ type Handler struct {
 	upgrader     websocket.Upgrader
 }
 
-// NewHandler authenticates websockets through the Authorization header, which
-// browsers cannot attach cross-origin, so every origin is accepted. Write
+// NewHandler authenticates websockets through an explicit token (Authorization
+// header or query parameter) that browsers never attach on their own
+// cross-origin, so every origin is accepted. Write
 // buffers are pooled and read buffers kept small because clients only receive.
 func NewHandler(chat Chat, conns Connections, maxBodyBytes int64) *Handler {
 	return &Handler{

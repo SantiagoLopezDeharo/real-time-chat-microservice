@@ -189,6 +189,76 @@ func TestRouteMatrix(t *testing.T) {
 	}
 }
 
+func (f *fixture) dialQuery(rawQuery string, header http.Header) (*http.Response, error) {
+	conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(f.srv.URL, "http")+"/ws?"+rawQuery, header)
+	if err == nil {
+		_ = conn.Close()
+	}
+	return resp, err
+}
+
+func TestWebsocketAcceptsQueryToken(t *testing.T) {
+	f := newFixture(t, 100)
+	if _, err := f.dialQuery("token="+f.token(t, "alice"), nil); err != nil {
+		t.Fatalf("query token rejected: %v", err)
+	}
+}
+
+func TestWebsocketQueryTokenIsValidatedLikeHeaderToken(t *testing.T) {
+	f := newFixture(t, 100)
+	sign := func(method jwt.SigningMethod, key any, claims jwt.MapClaims) string {
+		tok, err := jwt.NewWithClaims(method, claims).SignedString(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	forged := map[string]string{
+		"wrong secret": sign(jwt.SigningMethodHS256, []byte("guess"), jwt.MapClaims{"id": "alice"}),
+		"expired":      sign(jwt.SigningMethodHS256, []byte(f.cfg.JWTSecret), jwt.MapClaims{"id": "alice", "exp": time.Now().Add(-time.Minute).Unix()}),
+		"alg none":     sign(jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, jwt.MapClaims{"id": "alice"}),
+		"missing id":   sign(jwt.SigningMethodHS256, []byte(f.cfg.JWTSecret), jwt.MapClaims{"sub": "alice"}),
+		"empty":        "",
+	}
+	for name, token := range forged {
+		resp, err := f.dialQuery("token="+token, nil)
+		if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: resp=%v err=%v, want 401", name, resp, err)
+		}
+	}
+}
+
+func TestWebsocketHeaderTokenWinsOverQueryToken(t *testing.T) {
+	f := newFixture(t, 100)
+	valid := f.token(t, "alice")
+	if _, err := f.dialQuery("token=forged", http.Header{"Authorization": {"Bearer " + valid}}); err != nil {
+		t.Errorf("valid header with bad query token rejected: %v", err)
+	}
+	resp, err := f.dialQuery("token="+valid, http.Header{"Authorization": {"Bearer forged"}})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("bad header with valid query token: resp=%v err=%v, want 401", resp, err)
+	}
+}
+
+func TestQueryTokenIsIgnoredOnRestRoutes(t *testing.T) {
+	f := newFixture(t, 100)
+	token := f.token(t, "alice")
+	for _, tt := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/messages?token=" + token, `{"participants":["alice"],"content":"x"}`},
+		{http.MethodGet, "/api/messages/get?participants=alice&token=" + token, ""},
+	} {
+		req, _ := http.NewRequest(tt.method, f.srv.URL+tt.path, strings.NewReader(tt.body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s: %d, want 401", tt.method, tt.path, resp.StatusCode)
+		}
+	}
+}
+
 func TestRateLimitAppliesToAPIButNotWebsocket(t *testing.T) {
 	f := newFixture(t, 2)
 	for i, want := range []int{202, 202, 429, 429} {

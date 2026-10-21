@@ -19,7 +19,7 @@ func Routes(cfg *config.Config, h *httpapi.Handler) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", h.Health)
-	mux.Handle("GET /ws", auth(http.HandlerFunc(h.HandleWebsocket)))
+	mux.Handle("GET /ws", middleware.AcceptQueryToken(auth(http.HandlerFunc(h.HandleWebsocket))))
 	mux.Handle("POST /api/messages", protected(h.HandleSendMessage))
 	mux.Handle("GET /api/messages/get", protected(h.HandleGetMessages))
 	mux.HandleFunc("POST /api/connections", h.HandleGetUserConnections)

@@ -85,10 +85,31 @@ func TestMalformedAuthorizationHeaders(t *testing.T) {
 			t.Errorf("Authorization %.30q: %d", header, resp.StatusCode)
 		}
 	}
-	for _, query := range []string{"token=" + valid, "access_token=" + valid} {
-		if _, resp, err := websocket.DefaultDialer.Dial(s.wsURL+"/ws?"+query, nil); err == nil || resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("websocket with %s authenticated", query[:5])
+	if _, resp, err := websocket.DefaultDialer.Dial(s.wsURL+"/ws?access_token="+valid, nil); err == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Error("websocket with access_token authenticated")
+	}
+}
+
+func TestWebsocketQueryToken(t *testing.T) {
+	s := startServer(t)
+	conn, _, err := websocket.DefaultDialer.Dial(s.wsURL+"/ws?token="+s.userToken(t, "alice"), nil)
+	if err != nil {
+		t.Fatalf("query token rejected: %v", err)
+	}
+	_ = conn.Close()
+
+	for name, token := range forgedTokens(t, s) {
+		if _, resp, err := websocket.DefaultDialer.Dial(s.wsURL+"/ws?token="+url.QueryEscape(token), nil); err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: forged query token authenticated", name)
 		}
+	}
+
+	valid := s.userToken(t, "alice")
+	if res := s.request(t, http.MethodGet, historyPath([]string{"alice"}, 0, 1)+"&token="+valid, "", nil); res.status != http.StatusUnauthorized {
+		t.Errorf("history with query token: %d, want 401", res.status)
+	}
+	if res := s.request(t, http.MethodPost, "/api/messages?token="+valid, "", sendBody([]string{"alice"}, "x")); res.status != http.StatusUnauthorized {
+		t.Errorf("send with query token: %d, want 401", res.status)
 	}
 }
 
