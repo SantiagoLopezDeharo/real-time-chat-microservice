@@ -262,7 +262,7 @@ func TestBackpressureWhenDatabaseStalls(t *testing.T) {
 	token := s.userToken(t, "alice")
 	for range 32 {
 		wg.Go(func() {
-			for range 60 {
+			for range 120 {
 				start := time.Now()
 				res := s.request(t, http.MethodPost, "/api/messages", token, sendBody([]string{"alice", "bob"}, "while the database is stalled"))
 				if d := int64(time.Since(start)); d > slowest.Load() {
