@@ -47,10 +47,10 @@ docker-push: scan
 	docker buildx build $(BUILD_ARGS) --platform $(PLATFORMS) --sbom=true --provenance=mode=max \
 		--output type=registry,\"name=$(IMAGE):$(VERSION),$(IMAGE):latest\",rewrite-timestamp=true .
 
-# Keyless Sigstore signature of the pushed multi-arch index; opens a browser
-# to authenticate the signer.
+# Keyless Sigstore signature of the pushed multi-arch index. Uses the browser
+# flow because the device flow is rejected by the Google identity provider.
 sign:
-	cosign sign --yes $(IMAGE)@$(DIGEST)
+	cosign sign --yes --fulcio-auth-flow=normal $(IMAGE)@$(DIGEST)
 
 verify:
 	cosign verify --certificate-identity=$(COSIGN_IDENTITY) --certificate-oidc-issuer=$(COSIGN_ISSUER) $(IMAGE):$(VERSION) > /dev/null
