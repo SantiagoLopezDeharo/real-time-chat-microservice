@@ -39,3 +39,6 @@ go.work.sum
 */node_modules
 # Locally built binaries
 /server
+
+# e2e performance reports and profiles
+test/e2e/reports/
