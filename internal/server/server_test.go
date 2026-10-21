@@ -27,10 +27,10 @@ type memStore struct {
 	msgs []*models.Message
 }
 
-func (m *memStore) Save(_ context.Context, msg *models.Message) error {
+func (m *memStore) SaveBatch(_ context.Context, msgs []*models.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.msgs = append(m.msgs, msg)
+	m.msgs = append(m.msgs, msgs...)
 	return nil
 }
 

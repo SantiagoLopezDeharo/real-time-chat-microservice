@@ -22,7 +22,7 @@ var (
 )
 
 type Store interface {
-	Save(ctx context.Context, msg *models.Message) error
+	SaveBatch(ctx context.Context, msgs []*models.Message) error
 	History(ctx context.Context, participants []string, page, size int) ([]*models.Message, error)
 }
 
@@ -33,6 +33,7 @@ type Broadcaster interface {
 type Options struct {
 	Workers      int
 	QueueSize    int
+	MaxBatch     int
 	MaxRetries   int
 	RetryBackoff time.Duration
 	SaveTimeout  time.Duration
@@ -42,6 +43,7 @@ func DefaultOptions(maxRetries int) Options {
 	return Options{
 		Workers:      4,
 		QueueSize:    1024,
+		MaxBatch:     256,
 		MaxRetries:   maxRetries,
 		RetryBackoff: 100 * time.Millisecond,
 		SaveTimeout:  5 * time.Second,
@@ -49,7 +51,8 @@ func DefaultOptions(maxRetries int) Options {
 }
 
 // ChatService delivers messages to connected participants immediately and
-// persists them asynchronously through a bounded queue drained by workers.
+// persists them asynchronously through a bounded queue drained by workers, each
+// writing whatever has queued up since its last write in a single batch.
 type ChatService struct {
 	store Store
 	hub   Broadcaster
@@ -139,26 +142,46 @@ func (s *ChatService) History(ctx context.Context, userID string, participants [
 }
 
 func (s *ChatService) persist() {
+	batch := make([]*models.Message, 0, s.opts.MaxBatch)
 	for msg := range s.queue {
-		s.save(msg)
+		batch = append(batch[:0], msg)
+		batch = s.drain(batch)
+		s.save(batch)
+		clear(batch)
 	}
 }
 
-func (s *ChatService) save(msg *models.Message) {
+// drain appends already queued messages to batch without waiting for more.
+func (s *ChatService) drain(batch []*models.Message) []*models.Message {
+	for len(batch) < s.opts.MaxBatch {
+		select {
+		case msg, ok := <-s.queue:
+			if !ok {
+				return batch
+			}
+			batch = append(batch, msg)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
+
+func (s *ChatService) save(batch []*models.Message) {
 	var err error
 	for attempt := 1; attempt <= s.opts.MaxRetries; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.SaveTimeout)
-		err = s.store.Save(ctx, msg)
+		err = s.store.SaveBatch(ctx, batch)
 		cancel()
 		if err == nil {
 			return
 		}
-		slog.Warn("failed to save message", "attempt", attempt, "max", s.opts.MaxRetries, "error", err)
+		slog.Warn("failed to save messages", "count", len(batch), "attempt", attempt, "max", s.opts.MaxRetries, "error", err)
 		if attempt < s.opts.MaxRetries {
 			time.Sleep(time.Duration(attempt) * s.opts.RetryBackoff)
 		}
 	}
-	slog.Error("dropping message after retries", "id", msg.ID.Hex(), "error", err)
+	slog.Error("dropping messages after retries", "count", len(batch), "error", err)
 }
 
 // Close stops accepting messages and waits until every queued message has been

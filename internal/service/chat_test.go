@@ -17,6 +17,7 @@ import (
 type fakeStore struct {
 	mu       sync.Mutex
 	saved    []*models.Message
+	batches  []int
 	attempts int
 	failures int
 	gate     chan struct{}
@@ -28,7 +29,7 @@ type fakeStore struct {
 	}
 }
 
-func (f *fakeStore) Save(ctx context.Context, msg *models.Message) error {
+func (f *fakeStore) SaveBatch(ctx context.Context, msgs []*models.Message) error {
 	if f.gate != nil {
 		select {
 		case <-f.gate:
@@ -43,7 +44,8 @@ func (f *fakeStore) Save(ctx context.Context, msg *models.Message) error {
 		f.failures--
 		return errors.New("transient")
 	}
-	f.saved = append(f.saved, msg)
+	f.saved = append(f.saved, msgs...)
+	f.batches = append(f.batches, len(msgs))
 	return nil
 }
 
@@ -84,7 +86,7 @@ func (f *fakeHub) count() int {
 }
 
 func testOptions() Options {
-	return Options{Workers: 2, QueueSize: 16, MaxRetries: 3, RetryBackoff: time.Millisecond, SaveTimeout: time.Second}
+	return Options{Workers: 2, QueueSize: 16, MaxBatch: 8, MaxRetries: 3, RetryBackoff: time.Millisecond, SaveTimeout: time.Second}
 }
 
 func newTestService(t *testing.T, store *fakeStore, opts Options) (*ChatService, *fakeHub) {
@@ -240,6 +242,38 @@ func TestSendFailsFastWhenPersistenceIsFull(t *testing.T) {
 	}
 	if hub.count() != accepted {
 		t.Errorf("broadcasts = %d, accepted = %d: rejected messages must not be delivered", hub.count(), accepted)
+	}
+}
+
+func TestQueuedMessagesArePersistedInBatches(t *testing.T) {
+	store := &fakeStore{gate: make(chan struct{})}
+	opts := testOptions()
+	opts.Workers, opts.QueueSize, opts.MaxBatch = 1, 64, 10
+	svc, _ := newTestService(t, store, opts)
+
+	const queued = 41
+	for i := range queued {
+		if _, err := svc.Send("alice", []string{"alice", "bob"}, fmt.Sprint(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(store.gate)
+	waitFor(t, "all messages persisted", func() bool { return store.savedCount() == queued })
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, n := range store.batches {
+		if n > opts.MaxBatch {
+			t.Errorf("batch of %d exceeds MaxBatch %d", n, opts.MaxBatch)
+		}
+	}
+	if len(store.batches) > 6 {
+		t.Errorf("%d round trips for %d queued messages: %v", len(store.batches), queued, store.batches)
+	}
+	for i, m := range store.saved {
+		if m.Content != fmt.Sprint(i) {
+			t.Fatalf("persisted out of order at %d: %q", i, m.Content)
+		}
 	}
 }
 

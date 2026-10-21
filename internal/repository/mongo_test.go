@@ -86,8 +86,8 @@ func message(participants []string, content string, at time.Time) *models.Messag
 func save(t *testing.T, repo *MongoRepository, msgs ...*models.Message) {
 	t.Helper()
 	for _, m := range msgs {
-		if err := repo.Save(context.Background(), m); err != nil {
-			t.Fatalf("Save: %v", err)
+		if err := repo.SaveBatch(context.Background(), []*models.Message{m}); err != nil {
+			t.Fatalf("SaveBatch: %v", err)
 		}
 	}
 }
@@ -199,12 +199,48 @@ func TestHistoryMatchesTheExactChannel(t *testing.T) {
 	}
 }
 
-func TestSaveRejectsDuplicateIDs(t *testing.T) {
+func TestSaveBatchInsertsEveryMessage(t *testing.T) {
 	repo := newRepo(t)
-	msg := message([]string{"alice", "bob"}, "once", time.Now())
-	save(t, repo, msg)
-	if err := repo.Save(context.Background(), msg); !mongo.IsDuplicateKeyError(err) {
-		t.Fatalf("second Save = %v, want duplicate key error", err)
+	channel := []string{"alice", "bob"}
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	batch := make([]*models.Message, 300)
+	for i := range batch {
+		batch[i] = message(channel, fmt.Sprintf("m%03d", i), base.Add(time.Duration(i)*time.Millisecond))
+	}
+	if err := repo.SaveBatch(context.Background(), batch); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := repo.History(context.Background(), channel, 0, 100)
+	if len(got) != 100 || got[0].Content != "m299" {
+		t.Fatalf("history after batch = %d messages starting %q", len(got), got[0].Content)
+	}
+}
+
+func TestSaveBatchRetriesAreIdempotent(t *testing.T) {
+	repo := newRepo(t)
+	channel := []string{"alice", "bob"}
+	first := message(channel, "first", time.Now())
+	save(t, repo, first)
+
+	retried := []*models.Message{first, message(channel, "second", time.Now()), first}
+	if err := repo.SaveBatch(context.Background(), retried); err != nil {
+		t.Fatalf("retrying a partially applied batch = %v, want nil", err)
+	}
+	got, _ := repo.History(context.Background(), channel, 0, 10)
+	if len(got) != 2 {
+		t.Fatalf("stored %d messages, want 2 without duplicates", len(got))
+	}
+}
+
+func TestSaveBatchReportsRealFailures(t *testing.T) {
+	repo := newRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := repo.SaveBatch(ctx, []*models.Message{message([]string{"alice"}, "x", time.Now())}); err == nil {
+		t.Fatal("cancelled insert reported success")
+	}
+	if onlyDuplicates(nil) || onlyDuplicates(errors.New("boom")) || onlyDuplicates(mongo.BulkWriteException{}) {
+		t.Fatal("non-duplicate errors classified as duplicates")
 	}
 }
 
@@ -227,8 +263,8 @@ func TestOperationsHonourContext(t *testing.T) {
 	repo := newRepo(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := repo.Save(ctx, message([]string{"a"}, "x", time.Now())); !errors.Is(err, context.Canceled) {
-		t.Errorf("Save with cancelled context = %v", err)
+	if err := repo.SaveBatch(ctx, []*models.Message{message([]string{"a"}, "x", time.Now())}); !errors.Is(err, context.Canceled) {
+		t.Errorf("SaveBatch with cancelled context = %v", err)
 	}
 	if _, err := repo.History(ctx, []string{"a"}, 0, 1); !errors.Is(err, context.Canceled) {
 		t.Errorf("History with cancelled context = %v", err)
@@ -246,21 +282,32 @@ func TestNewMongoRepositoryFailures(t *testing.T) {
 	}
 }
 
-func BenchmarkSave(b *testing.B) {
-	repo := newRepo(b)
-	channel := []string{"alice", "bob"}
-	b.ReportAllocs()
-	for b.Loop() {
-		_ = repo.Save(context.Background(), message(channel, "hello", time.Now()))
+func BenchmarkSaveBatch(b *testing.B) {
+	for _, size := range []int{1, 64} {
+		b.Run(fmt.Sprintf("batch=%d", size), func(b *testing.B) {
+			repo := newRepo(b)
+			channel := []string{"alice", "bob"}
+			batch := make([]*models.Message, size)
+			b.ReportAllocs()
+			for b.Loop() {
+				for i := range batch {
+					batch[i] = message(channel, "hello", time.Now())
+				}
+				_ = repo.SaveBatch(context.Background(), batch)
+			}
+			b.ReportMetric(float64(b.N*size)/b.Elapsed().Seconds(), "msgs/s")
+		})
 	}
 }
 
 func BenchmarkHistory(b *testing.B) {
 	repo := newRepo(b)
 	channel := []string{"alice", "bob"}
-	for i := range 500 {
-		_ = repo.Save(context.Background(), message(channel, fmt.Sprint(i), time.Now()))
+	batch := make([]*models.Message, 500)
+	for i := range batch {
+		batch[i] = message(channel, fmt.Sprint(i), time.Now())
 	}
+	_ = repo.SaveBatch(context.Background(), batch)
 	b.ReportAllocs()
 	for b.Loop() {
 		_, _ = repo.History(context.Background(), channel, 0, 50)
