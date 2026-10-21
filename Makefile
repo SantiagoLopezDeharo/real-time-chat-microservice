@@ -45,7 +45,7 @@ docker-build:
 
 docker-push: scan
 	docker buildx build $(BUILD_ARGS) --platform $(PLATFORMS) --sbom=true --provenance=mode=max \
-		--output type=image,\"name=$(IMAGE):$(VERSION),$(IMAGE):latest\",push=true,rewrite-timestamp=true .
+		--output type=registry,\"name=$(IMAGE):$(VERSION),$(IMAGE):latest\",rewrite-timestamp=true .
 
 # Keyless Sigstore signature of the pushed multi-arch index; opens a browser
 # to authenticate the signer.
