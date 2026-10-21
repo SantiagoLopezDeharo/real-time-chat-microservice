@@ -105,22 +105,6 @@ func FuzzNormalizeParticipants(f *testing.F) {
 	})
 }
 
-func TestChannelIDHelpers(t *testing.T) {
-	if got := CreateChannelID([]string{"c", "a", "b"}); got != "a,b,c" {
-		t.Errorf("CreateChannelID = %q", got)
-	}
-	if got := ParseChannelID("c,a,b"); !slices.Equal(got, []string{"a", "b", "c"}) {
-		t.Errorf("ParseChannelID = %q", got)
-	}
-	if got := ParseChannelID(""); len(got) != 0 {
-		t.Errorf("ParseChannelID(\"\") = %q", got)
-	}
-	m := &Message{Participants: []string{"a", "b"}}
-	if got := m.GetChannelID(); got != "a,b" {
-		t.Errorf("GetChannelID = %q", got)
-	}
-}
-
 func TestContainsUser(t *testing.T) {
 	participants := []string{"alice", "bob"}
 	if !ContainsUser(participants, "alice") || !ContainsUser(participants, "bob") {

@@ -3,7 +3,6 @@ package models
 import (
 	"errors"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -45,30 +44,6 @@ func NormalizeParticipants(raw []string) ([]string, error) {
 	}
 	slices.Sort(participants)
 	return slices.Compact(participants), nil
-}
-
-// GetChannelID returns a consistent string representation of the channel
-// by joining sorted participant IDs
-func (m *Message) GetChannelID() string {
-	return strings.Join(m.Participants, ",")
-}
-
-// CreateChannelID creates a consistent channel ID from participant IDs
-func CreateChannelID(participants []string) string {
-	sorted := make([]string, len(participants))
-	copy(sorted, participants)
-	sort.Strings(sorted)
-	return strings.Join(sorted, ",")
-}
-
-// ParseChannelID converts a channel ID string back to sorted participants array
-func ParseChannelID(channelID string) []string {
-	if channelID == "" {
-		return []string{}
-	}
-	participants := strings.Split(channelID, ",")
-	sort.Strings(participants)
-	return participants
 }
 
 // ContainsUser checks if a user is part of the channel
