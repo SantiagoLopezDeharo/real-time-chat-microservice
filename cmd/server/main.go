@@ -1,112 +1,91 @@
 package main
 
 import (
-	"log"
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"chat-microservice/internal/config"
 	"chat-microservice/internal/httpapi"
-	"chat-microservice/internal/middleware"
 	"chat-microservice/internal/repository"
+	"chat-microservice/internal/server"
 	"chat-microservice/internal/service"
 	"chat-microservice/internal/ws"
 
 	"github.com/joho/godotenv"
-	"golang.org/x/time/rate"
+)
+
+const (
+	connectTimeout  = 10 * time.Second
+	shutdownTimeout = 15 * time.Second
 )
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using environment variables")
+	if err := run(); err != nil {
+		slog.Error("server stopped", "error", err)
+		os.Exit(1)
 	}
+}
 
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		log.Fatal("JWT_SECRET environment variable not set")
-	}
-
-	mongoURI := os.Getenv("MONGO_URI")
-	if mongoURI == "" {
-		mongoURI = "mongodb://localhost:27017"
-	}
-
-	mongoDB := os.Getenv("MONGO_DB")
-	if mongoDB == "" {
-		mongoDB = "chatdb"
-	}
-
-	mongoCollection := os.Getenv("MONGO_COLLECTION")
-	if mongoCollection == "" {
-		mongoCollection = "messages"
-	}
-
-	maxRetries := 5
-	if retryStr := os.Getenv("RETRY_ATTEMPTS"); retryStr != "" {
-		if parsed, err := strconv.Atoi(retryStr); err == nil && parsed > 0 {
-			maxRetries = parsed
-		}
-	}
-
-	rps := rate.Limit(5)
-	if rpsStr := os.Getenv("RATE_LIMIT_RPS"); rpsStr != "" {
-		if parsed, err := strconv.ParseFloat(rpsStr, 64); err == nil && parsed > 0 {
-			rps = rate.Limit(parsed)
-		}
-	}
-
-	burst := 10
-	if burstStr := os.Getenv("RATE_LIMIT_BURST"); burstStr != "" {
-		if parsed, err := strconv.Atoi(burstStr); err == nil && parsed > 0 {
-			burst = parsed
-		}
-	}
-
-	repo, err := repository.NewMongoRepository(mongoURI, mongoDB, mongoCollection)
+func run() error {
+	_ = godotenv.Load()
+	cfg, err := config.Load(os.Getenv)
 	if err != nil {
-		log.Fatalf("failed to connect to MongoDB: %v", err)
+		return err
 	}
 
-	hub := ws.NewHub()
-	svc := service.NewChatService(repo, hub, maxRetries)
-
-	go hub.Run()
-
-	h := httpapi.NewHandler(svc)
-
-	authMiddleware := middleware.NewAuthMiddleware(jwtSecret)
-	rateLimiter := middleware.NewRateLimiter(rps, burst)
-
-	mux := http.NewServeMux()
-
-	protectedAPI := http.NewServeMux()
-	protectedAPI.HandleFunc("/api/messages", h.HandleSendMessage)
-	protectedAPI.HandleFunc("/api/messages/get", h.HandleGetMessages)
-
-	protectedWS := http.NewServeMux()
-	protectedWS.HandleFunc("/ws", h.HandleWebsocket)
-
-	mux.HandleFunc("/health", h.Health)
-	mux.Handle("/api/", authMiddleware.Verify(rateLimiter.Middleware(protectedAPI)))
-	mux.Handle("/ws", authMiddleware.Verify(protectedWS))
-	mux.HandleFunc("/api/connections", h.HandleGetUserConnections)
-
-	addr := ":8080"
-	if v := os.Getenv("PORT"); v != "" {
-		addr = ":" + v
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), connectTimeout)
+	repo, err := repository.NewMongoRepository(connectCtx, cfg.MongoURI, cfg.MongoDB, cfg.MongoCollection)
+	cancelConnect()
+	if err != nil {
+		return err
 	}
 
-	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	hub := ws.NewHub(ws.DefaultOptions())
+	chat := service.NewChatService(repo, hub, service.DefaultOptions(cfg.RetryAttempts))
+	handler := httpapi.NewHandler(chat, hub, cfg.MaxBodyBytes)
+	srv := server.New(":"+cfg.Port, server.Routes(cfg, handler))
+	errs := make(chan error, 2)
+
+	go func() { errs <- serve(srv) }()
+	slog.Info("server listening", "port", cfg.Port)
+
+	if cfg.PprofAddr != "" {
+		debug := server.Pprof(cfg.PprofAddr)
+		go func() { errs <- serve(debug) }()
+		defer debug.Close()
+		slog.Info("pprof listening", "addr", cfg.PprofAddr)
 	}
 
-	log.Printf("starting server on %s", addr)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("server failed: %v", err)
+	var serveErr error
+	select {
+	case serveErr = <-errs:
+	case <-ctx.Done():
 	}
+
+	slog.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	return errors.Join(
+		serveErr,
+		srv.Shutdown(shutdownCtx),
+		hub.Shutdown(shutdownCtx),
+		chat.Close(shutdownCtx),
+		repo.Close(shutdownCtx),
+	)
+}
+
+func serve(srv *http.Server) error {
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }

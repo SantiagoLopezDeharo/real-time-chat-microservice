@@ -1,17 +1,50 @@
 package models
 
 import (
+	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+)
+
+const MaxParticipants = 1000
+
+var (
+	ErrNoParticipants      = errors.New("participants array is required")
+	ErrEmptyParticipant    = errors.New("participant IDs must not be empty")
+	ErrTooManyParticipants = errors.New("too many participants")
 )
 
 type Message struct {
-	ID           string    `json:"id,omitempty" bson:"_id,omitempty"`
-	Sender       string    `json:"sender" bson:"sender"`
-	Content      string    `json:"content" bson:"content"`
-	CreatedAt    time.Time `json:"created_at" bson:"created_at"`
-	Participants []string  `json:"participants" bson:"participants"` // Sorted array of user IDs
+	ID           bson.ObjectID `json:"id" bson:"_id"`
+	Sender       string        `json:"sender" bson:"sender"`
+	Content      string        `json:"content" bson:"content"`
+	CreatedAt    time.Time     `json:"created_at" bson:"created_at"`
+	Participants []string      `json:"participants" bson:"participants"` // Sorted array of user IDs
+}
+
+// NormalizeParticipants trims, de-duplicates and sorts participant IDs so the
+// same set of users always identifies the same channel.
+func NormalizeParticipants(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, ErrNoParticipants
+	}
+	if len(raw) > MaxParticipants {
+		return nil, ErrTooManyParticipants
+	}
+	participants := make([]string, 0, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, ErrEmptyParticipant
+		}
+		participants = append(participants, p)
+	}
+	slices.Sort(participants)
+	return slices.Compact(participants), nil
 }
 
 // GetChannelID returns a consistent string representation of the channel

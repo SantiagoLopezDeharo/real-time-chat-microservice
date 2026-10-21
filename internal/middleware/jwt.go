@@ -2,30 +2,35 @@ package middleware
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-type contextKey string
-
-const (
-	UserContextKey contextKey = "userID"
-)
+type userIDKey struct{}
 
 type CustomClaims struct {
 	ID string `json:"id"`
 	jwt.RegisteredClaims
 }
 
+var hmacMethods = []string{
+	jwt.SigningMethodHS256.Alg(),
+	jwt.SigningMethodHS384.Alg(),
+	jwt.SigningMethodHS512.Alg(),
+}
+
 type AuthMiddleware struct {
-	secret string
+	key    []byte
+	parser *jwt.Parser
 }
 
 func NewAuthMiddleware(secret string) *AuthMiddleware {
-	return &AuthMiddleware{secret: secret}
+	return &AuthMiddleware{
+		key:    []byte(secret),
+		parser: jwt.NewParser(jwt.WithValidMethods(hmacMethods)),
+	}
 }
 
 func (am *AuthMiddleware) Verify(next http.Handler) http.Handler {
@@ -36,34 +41,28 @@ func (am *AuthMiddleware) Verify(next http.Handler) http.Handler {
 			return
 		}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
+		tokenString, ok := strings.CutPrefix(authHeader, "Bearer ")
+		if !ok || tokenString == "" || strings.ContainsRune(tokenString, ' ') {
 			http.Error(w, "invalid authorization header format", http.StatusUnauthorized)
 			return
 		}
 
-		tokenString := parts[1]
-
 		claims := &CustomClaims{}
-
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return []byte(am.secret), nil
-		})
-
-		if err != nil || !token.Valid {
+		if _, err := am.parser.ParseWithClaims(tokenString, claims, am.keyFunc); err != nil || strings.TrimSpace(claims.ID) == "" {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), UserContextKey, claims.ID)
+		ctx := context.WithValue(r.Context(), userIDKey{}, claims.ID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
+func (am *AuthMiddleware) keyFunc(*jwt.Token) (any, error) {
+	return am.key, nil
+}
+
 func GetUserID(r *http.Request) (string, bool) {
-	userID, ok := r.Context().Value(UserContextKey).(string)
+	userID, ok := r.Context().Value(userIDKey{}).(string)
 	return userID, ok
 }

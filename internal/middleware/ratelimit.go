@@ -37,7 +37,7 @@ func (rl *RateLimiter) getVisitor(userID string) *rate.Limiter {
 
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userID, ok := r.Context().Value(UserContextKey).(string)
+		userID, ok := GetUserID(r)
 		if !ok {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
