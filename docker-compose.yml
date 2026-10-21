@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   mongodb:
     image: mongo:7.0
@@ -16,6 +14,7 @@ services:
       - chat-network
 
   chat-api:
+    image: slincsilver/real-time-chat-microservice:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -30,6 +29,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-5}
       RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-10}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-65536}
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     depends_on:

@@ -1,11 +1,12 @@
 .git
-.gitignore
-README.md
 .env
 *.md
 .vscode
 .idea
+demo
+test
 bin/
-*.log
 tmp/
 vendor/
+*.log
+/server
