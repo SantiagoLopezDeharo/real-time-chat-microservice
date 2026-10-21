@@ -237,8 +237,8 @@ func TestSendFailsFastWhenPersistenceIsFull(t *testing.T) {
 	if !errors.Is(lastErr, ErrOverloaded) {
 		t.Fatalf("error = %v, want ErrOverloaded", lastErr)
 	}
-	if accepted > 3 || accepted < 2 {
-		t.Errorf("accepted = %d, want queue size plus the in-flight message", accepted)
+	if accepted < opts.QueueSize || accepted > opts.QueueSize+opts.MaxBatch {
+		t.Errorf("accepted = %d, want the queue size plus at most one in-flight batch", accepted)
 	}
 	if hub.count() != accepted {
 		t.Errorf("broadcasts = %d, accepted = %d: rejected messages must not be delivered", hub.count(), accepted)
