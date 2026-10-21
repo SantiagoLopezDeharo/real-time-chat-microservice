@@ -5,8 +5,6 @@ services:
     restart: unless-stopped
     environment:
       MONGO_INITDB_DATABASE: ${MONGO_DB:-chatdb}
-    ports:
-      - "27017:27017"
     volumes:
       - mongodb_data:/data/db
       - mongodb_config:/data/configdb
@@ -14,7 +12,7 @@ services:
       - chat-network
 
   chat-api:
-    image: slincsilver/real-time-chat-microservice:latest
+    image: slincsilver/real-time-chat-microservice:1.0.1
     build:
       context: .
       dockerfile: Dockerfile
@@ -26,7 +24,7 @@ services:
       MONGO_COLLECTION: ${MONGO_COLLECTION:-messages}
       RETRY_ATTEMPTS: ${RETRY_ATTEMPTS:-5}
       PORT: ${PORT:-8080}
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-5}
       RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-10}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-65536}
@@ -36,6 +34,12 @@ services:
       - mongodb
     networks:
       - chat-network
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 2
+    pids_limit: 256
 
 volumes:
   mongodb_data:
