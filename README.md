@@ -14,10 +14,10 @@ A production-ready, scalable Go microservice for real-time chat with support for
 - 🚀 **Participant-Based Channels**: Channels are defined by participant user IDs - no arbitrary channel IDs needed
 - 🔌 **Efficient WebSocket**: Single connection per user receives messages from all channels
 - 🎯 **Smart Broadcasting**: Sender doesn't receive their own messages (prevents duplicates)
-- 💾 **Async Persistence**: Messages broadcast immediately, saved to MongoDB with retry logic
+- 💾 **Async Persistence**: Messages broadcast immediately, saved to MongoDB in batches with idempotent retries and drained on shutdown
 - 🔐 **JWT Authentication**: Secure user identification with clean authorization model
 - 📊 **Scalable Architecture**: Modular design ready for horizontal scaling
-- 🐳 **Docker Ready**: Complete Docker Compose setup with MongoDB volumes
+- 🐳 **Docker Ready**: 15 MB multi-arch image on Docker Hub plus a Docker Compose setup with MongoDB volumes
 
 ## 🏗️ Architecture
 
@@ -33,7 +33,7 @@ Channels are identified by the set of participants (user IDs):
 - Much more efficient than one connection per channel
 
 ### Broadcasting Logic
-- Message sent via REST API → Broadcast to all participants except sender → Async persist to MongoDB
+- Message sent via REST API → Queued for persistence → Broadcast to all participants except sender → Batched write to MongoDB
 - Sender sees message immediately in UI (optimistic update)
 - Other participants receive via WebSocket in real-time
 
@@ -41,23 +41,38 @@ Channels are identified by the set of participants (user IDs):
 
 ```
 .
-├── cmd/server/          # Application entrypoint
+├── cmd/server/          # Application entrypoint and graceful shutdown
 ├── internal/
+│   ├── config/         # Environment configuration and validation
+│   ├── server/         # Routes, HTTP server hardening, pprof listener
 │   ├── httpapi/        # HTTP & WebSocket handlers
 │   ├── ws/             # WebSocket hub (user-based connection management)
-│   ├── service/        # Business logic layer
-│   ├── repository/     # MongoDB persistence with retry
-│   └── middleware/     # JWT authentication
+│   ├── service/        # Business logic and batched persistence
+│   ├── repository/     # MongoDB persistence
+│   └── middleware/     # JWT authentication and rate limiting
 ├── pkg/models/         # Domain models (Message structure)
+├── test/e2e/           # End-to-end, security, concurrency and performance suites
 ├── demo/               # Node.js CLI demo client
 ├── docker-compose.yml  # Docker services configuration
-└── Dockerfile          # Multi-stage Go build
+└── Dockerfile          # Multi-stage build on scratch
 
 ```
 
 ## 🚀 Quick Start
 
-### Option 1: Docker Compose (Recommended)
+### Option 1: Docker image
+
+```bash
+docker run -d -p 27017:27017 --name mongodb mongo:7.0
+docker run --rm -p 8080:8080 \
+  -e JWT_SECRET=your-jwt-secret \
+  -e MONGO_URI=mongodb://host.docker.internal:27017 \
+  slincsilver/real-time-chat-microservice:latest
+```
+
+The image (`linux/amd64`, `linux/arm64`) is built from `scratch`, runs as a non-root user and ships the CA bundle for TLS connections such as `mongodb+srv://` URIs.
+
+### Option 2: Docker Compose
 
 ```bash
 # Clone and start
@@ -68,7 +83,7 @@ docker-compose up --build
 # WebSocket: ws://localhost:8080/ws
 ```
 
-### Option 2: Local Development
+### Option 3: Local Development
 
 ```bash
 # Start MongoDB
@@ -78,6 +93,7 @@ docker run -d -p 27017:27017 --name mongodb mongo:7.0
 export MONGO_URI="mongodb://localhost:27017"
 export MONGO_DB="chatdb"
 export MONGO_COLLECTION="messages"
+export JWT_SECRET="your-jwt-secret"
 
 # Run the server
 go run cmd/server/main.go
@@ -90,8 +106,6 @@ cd demo
 npm install
 node index.js
 ```
-
-See [QUICKSTART.md](./QUICKSTART.md) for detailed examples!
 
 ## 📡 API Endpoints
 
@@ -114,7 +128,19 @@ The GET messages endpoint supports pagination for efficient message retrieval:
 
 **Formula:** `offset = page × size`
 
-Messages are always sorted by **newest first** (descending `created_at`).
+Messages are always sorted by **newest first** (descending `created_at`, ties broken by `id`). `page` is limited to 10000; an empty conversation returns `[]`.
+
+### Responses
+
+| Status | When |
+|--------|------|
+| `202` | Message accepted: `{"status":"message queued","id":"<message id>"}` |
+| `400` | Malformed JSON, no or empty participant IDs, more than 1000 participants, empty content |
+| `401` | Missing, malformed, forged or expired JWT, or a JWT without an `id` claim |
+| `403` | The authenticated user is not one of the participants (sending or reading) |
+| `413` | Request body larger than `MAX_BODY_BYTES` |
+| `429` | Per-user rate limit exceeded |
+| `503` | Persistence is saturated; retry after the `Retry-After` header. Nothing was delivered |
 
 ## 🔑 Authentication
 
@@ -128,7 +154,7 @@ Messages are always sorted by **newest first** (descending `created_at`).
 }
 ```
 
-**Note**: No `groups` field needed! Authorization is based on participant lists.
+**Note**: No `groups` field needed! Authorization is based on participant lists. Only HMAC-signed tokens (`HS256`/`HS384`/`HS512`) are accepted and the `id` claim is required.
 
 ### Authorization Rules
 
@@ -203,19 +229,20 @@ ws.on('message', (data) => {
 
 ### Environment Variables
 
-```bash
-# MongoDB Configuration
-MONGO_URI=mongodb://localhost:27017
-MONGO_DB=chatdb
-MONGO_COLLECTION=messages
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JWT_SECRET` | – (required) | HMAC secret used to verify user JWTs |
+| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB connection string |
+| `MONGO_DB` | `chatdb` | Database name |
+| `MONGO_COLLECTION` | `messages` | Collection name |
+| `PORT` | `8080` | HTTP listen port |
+| `RETRY_ATTEMPTS` | `5` | Attempts per persistence batch, must be ≥ 1 |
+| `RATE_LIMIT_RPS` | `5` | Sustained requests per second per user on `/api/*` |
+| `RATE_LIMIT_BURST` | `10` | Burst size per user, must be ≥ 1 |
+| `MAX_BODY_BYTES` | `65536` | Maximum request body; larger requests get `413` |
+| `PPROF_ADDR` | – (off) | Address for an optional `net/http/pprof` listener, e.g. `127.0.0.1:6060`. Never expose it publicly |
 
-# Server Configuration
-PORT=8080
-RETRY_ATTEMPTS=5  # Message persistence retry count
-
-# JWT (for demo only)
-JWT_SECRET=your-jwt-secret
-```
+Invalid values stop the service at startup with every problem reported at once. Note: MongoDB 8.x and 9.x refuse to start on Linux kernels 6.19+ ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)), which includes current Docker Desktop VMs, so the examples use `mongo:7.0`.
 
 ### Docker Volumes
 
@@ -247,51 +274,53 @@ JWT_SECRET=your-jwt-secret
 
 ## 🎯 Key Behaviors
 
-1. **Order Independence**: `["alice", "bob"]` and `["bob", "alice"]` are the same channel
+1. **Order Independence**: `["alice", "bob"]`, `["bob", "alice"]` and `["bob", " alice", "bob"]` are the same channel; IDs are trimmed and de-duplicated
 2. **No Echo**: Sender doesn't receive their own message via WebSocket
-3. **Single Connection**: One WebSocket per user handles all channels
-4. **Broadcast First**: Messages sent to WebSocket immediately, then persisted async
-5. **Retry Logic**: Failed MongoDB saves retry with exponential backoff
+3. **Single Connection**: One WebSocket per user handles all channels; every open tab of a recipient receives the message
+4. **Deliver Immediately, Persist in Batches**: Messages are queued for persistence, delivered over WebSocket at once and written to MongoDB by workers that batch whatever has queued up
+5. **Backpressure**: When persistence cannot keep up the API answers `503` instead of blocking, and nothing is delivered for rejected messages
+6. **Retry Logic**: Failed batches retry with linear backoff; message IDs are generated up front, so retries never duplicate messages
+7. **Durable Shutdown**: On `SIGTERM` the service stops accepting requests, closes WebSockets with `1001`, persists every acknowledged message and disconnects from MongoDB
+8. **Slow Consumers**: A connection with more than 4 MiB of undelivered messages is closed with `1008` so it never slows down others; clients should reconnect and reload history
 
 ## 📚 Documentation
 
-- [**QUICKSTART.md**](./QUICKSTART.md) - Get up and running in 5 minutes
 - [**ARCHITECTURE.md**](./ARCHITECTURE.md) - Deep dive into system design
-- [**PAGINATION.md**](./PAGINATION.md) - Complete pagination guide with examples
-- [**MIGRATION.md**](./MIGRATION.md) - Upgrading from channel-ID-based systems
-- [**CONCURRENCY.md**](./CONCURRENCY.md) - Concurrency optimizations and worker pools
-- [**test/README.md**](./test/README.md) - Integration test suite documentation
 - [**demo/README.md**](./demo/README.md) - Demo client usage guide
 
 ## 🧪 Testing
 
-### Integration Test Suite
-
-The project includes a comprehensive integration test suite that validates the entire system under high-concurrency scenarios:
-
 ```bash
-# Run all tests
-go test -v ./test
-
-# Or use the test runner script
-./test/run_tests.sh all
-
-# Run with race detection
-./test/run_tests.sh race
-
-# Run with coverage
-./test/run_tests.sh coverage
+make test        # unit tests with the race detector (starts a throwaway mongo:7.0, or set MONGO_TEST_URI)
+make e2e         # end-to-end suites against a race-detector build
+make e2e-image   # functional, security and concurrency suites against the Docker image
+make perf        # performance scenarios and optimization report
+make bench       # micro benchmarks
 ```
 
-**Test Coverage**:
-- ✅ High concurrency (10 users, 90 concurrent messages)
-- ✅ Group chat functionality (multi-participant channels)
-- ✅ Pagination system validation
-- ✅ Authorization and access control
-- ✅ Sender exclusion from broadcasts
-- ✅ Database persistence verification
+- **Unit tests** cover every package: configuration validation, participant normalization (fuzzed), JWT forgery and algorithm confusion, per-user rate limiting, request decoding and error mapping, persistence backpressure, batching, retries and drain on shutdown, websocket fan-out, framing, ordering, ping/pong liveness and slow-consumer eviction, and the MongoDB repository against a real database.
+- **End-to-end tests** (`test/e2e`, build tag `e2e`) start MongoDB in Docker, build the real binary with the race detector and coverage, boot it with throwaway secrets and its own database, and drive it with simulated users and browser tabs:
+  - *functional*: direct and group messages, multi-tab delivery, participant set semantics, history order and pagination, verbatim content, reconnects, graceful shutdown, every acknowledged message surviving a restart, startup validation;
+  - *security*: forged/expired/algorithm-confused tokens and tokens without a user, sender spoofing, outsiders reading or writing conversations, Mongo operator injection, body/participant/page limits, rate limiting, websocket protocol violations, slowloris, connection floods with goroutine-leak detection, no secrets or internals in error responses;
+  - *concurrency*: concurrent group senders with exactly-once and per-sender ordering checks, isolated parallel conversations, tab churn, slow consumers, `SIGTERM` under load with exact durability checks, `503` backpressure while MongoDB is frozen with `docker pause`. Any data race, panic or unclean exit reported by the server fails the run.
+- **Performance suite** profiles the live server through pprof and writes `test/e2e/reports/perf-<label>.md` with latency percentiles, throughput, memory and goroutines per connection, CPU/allocation/heap hotspots and the optimization opportunities they point to. `E2E_BINARY` profiles another build and `E2E_PERF_BASELINE` adds a comparison column.
 
-See [test/README.md](./test/README.md) for detailed test documentation.
+## ⚡ Performance
+
+Driven by the performance suite's findings, measured on an Apple M3 Pro (11 cores) with the load generator and MongoDB on the same host:
+
+| Metric | Before | After |
+|--------|-------:|------:|
+| Memory (RSS) per idle connection | 24.8 KiB | 13.0 KiB |
+| Goroutines per idle connection | 2 | 1 |
+| One-to-one messages per second (32 senders) | 7.0k | 45–50k |
+| Send request latency p50 | 4.5 ms | 0.4 ms |
+| Messages persisted per second | 6.4k | 44–52k |
+| History reads per second (newest 50 of 6000) | 0.8k | 5.8–6.0k |
+| History read latency p99 | 104 ms | 16–17 ms |
+| Group fan-out to 999 members, delivery latency p50 / p99 | 3.8 / 9.6 ms | 3.9–4.6 / 9.8–10.9 ms |
+
+The previous implementation inserted one document per round trip and made senders wait on it, which capped intake at the database's single-insert rate; persistence now writes batches and the history index covers the sort. At 7× the message rate, one-to-one delivery latency p99 rises from 1 ms to 4–5 ms. Remaining hotspots are kernel socket IO and the MongoDB driver allocating a decoder per inserted document to read back client-generated IDs.
 
 ### Manual Multi-User Chat Test
 
@@ -325,10 +354,10 @@ Alice's terminal will show:
 go build ./...
 ```
 
-### Run Tests (when implemented)
+### Run Tests
 
 ```bash
-go test ./...
+make test e2e
 ```
 
 ### View Logs
@@ -367,9 +396,17 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for scaling strategies.
 
 ## 🔒 Security Notes
 
+Built in:
+- JWT verification pinned to HMAC algorithms with a required user ID
+- Per-user rate limiting, request body limits and participant limits
+- HTTP header/read/write timeouts against slowloris-style attacks
+- Participation checks on every read and write
+- Bounded per-connection queues and slow-consumer eviction
+
 For production:
-- [ ] Use TLS/WSS for WebSocket
+- [ ] Terminate TLS/WSS in front of the service
 - [ ] Add authentication service integration
+- [ ] `/api/connections` is unauthenticated by design; keep it on an internal network if presence is sensitive
 
 ## 🤝 Contributing
 
@@ -377,7 +414,7 @@ Contributions welcome! Please:
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests (when test suite exists)
+4. Add tests
 5. Submit a pull request
 
 ## 📄 License

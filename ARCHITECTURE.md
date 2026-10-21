@@ -202,15 +202,16 @@ type BroadcastMessage struct {
 **Process**:
 1. Iterate through participants
 2. Skip sender
-3. For each participant, send to all their WebSocket connections
-4. Non-blocking: uses goroutines per connection
+3. For each participant, queue the message on all their WebSocket connections
+4. Non-blocking: each connection has a byte-bounded queue drained by a writer goroutine that only exists while there is work; connections that fall more than 4 MiB behind are closed with `1008`
 
 ### MongoDB Repository
 
 **Key Methods**:
-- `GetMessagesByParticipants(participants []string)`: Retrieves channel messages
-- `Save(msg *Message)`: Persists message (sorts participants first)
-- `SaveAsync(msg *Message, maxRetries int)`: Async save with retry
+- `History(ctx, participants, page, size)`: One page of a channel's messages, newest first, in a single query
+- `SaveBatch(ctx, msgs)`: Persists a batch with one unordered `InsertMany`; duplicates from retried batches count as saved
+
+Participants are normalized (trimmed, de-duplicated, sorted) by `models.NormalizeParticipants` before any query or write. Persistence workers in the service layer batch queued messages and retry failed batches.
 
 **Query Strategy**:
 ```javascript
@@ -284,12 +285,12 @@ Instance A                Instance B
 ## 📊 Performance Characteristics
 
 ### Concurrency
-- Each WebSocket write happens in its own goroutine
-- Non-blocking broadcasts
-- Async persistence with retry
+- Broadcasts run on the sender's request goroutine under a read lock, so conversations fan out in parallel
+- Idle connections cost one goroutine; writers start on demand and pings are timer driven
+- Async, batched persistence with retry and `503` backpressure when the queue is full
 
 ### Database
-- Index on `participants` for O(log n) lookups
+- Compound index on `participants`, `created_at`, `_id` covers both the lookup and the newest-first sort
 - Sorted arrays enable exact match queries
 - No need for complex $elemMatch queries
 
@@ -304,8 +305,9 @@ Instance A                Instance B
 - `MONGO_URI`: MongoDB connection string (default: `mongodb://localhost:27017`)
 - `MONGO_DB`: Database name (default: `chatdb`)
 - `MONGO_COLLECTION`: Collection name (default: `messages`)
-- `RETRY_ATTEMPTS`: Max retry attempts for async save (default: `5`)
+- `RETRY_ATTEMPTS`: Attempts per persistence batch (default: `5`)
 - `PORT`: Server port (default: `8080`)
+- `JWT_SECRET`, `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `MAX_BODY_BYTES`, `PPROF_ADDR`: see the README
 
 ### Docker Setup
 ```bash
