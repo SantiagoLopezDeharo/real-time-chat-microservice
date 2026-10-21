@@ -63,14 +63,33 @@ Channels are identified by the set of participants (user IDs):
 ### Option 1: Docker image
 
 ```bash
-docker run -d -p 27017:27017 --name mongodb mongo:7.0
+docker run -d -p 127.0.0.1:27017:27017 --name mongodb mongo:7.0
 docker run --rm -p 8080:8080 \
   -e JWT_SECRET=your-jwt-secret \
   -e MONGO_URI=mongodb://host.docker.internal:27017 \
-  slincsilver/real-time-chat-microservice:latest
+  slincsilver/real-time-chat-microservice:1.0.1
 ```
 
 The image (`linux/amd64`, `linux/arm64`) is built from `scratch`, runs as a non-root user and ships the CA bundle for TLS connections such as `mongodb+srv://` URIs.
+
+### Image security and supply chain
+
+- **Minimal image**: `scratch` base containing only the static binary and a CA bundle for TLS connections to MongoDB, running as UID `65532`. No shell, package manager or libc to exploit.
+- **Pinned build**: the Go builder image is pinned by digest and module checksums are verified against `go.sum`; the build context is an allowlist of sources only.
+- **Reproducible**: layer timestamps are set to the last commit time (`SOURCE_DATE_EPOCH`), so rebuilding a commit yields a bit-identical image digest.
+- **Scanned before publishing**: `make docker-push` runs `make scan` first and refuses to publish if `govulncheck` finds a vulnerability reachable from the code or Docker Scout finds a fixable critical/high CVE in the image.
+- **Attested**: every release carries an SBOM and SLSA provenance (max mode):
+  ```shell
+  docker buildx imagetools inspect slincsilver/real-time-chat-microservice:1.0.1 --format '{{json .SBOM}}'
+  docker buildx imagetools inspect slincsilver/real-time-chat-microservice:1.0.1 --format '{{json .Provenance}}'
+  ```
+- **Signed**: releases are signed keyless with [Sigstore cosign](https://docs.sigstore.dev/); verify before deploying:
+  ```shell
+  cosign verify slincsilver/real-time-chat-microservice:1.0.1 \
+    --certificate-identity=santiagolhgpro@gmail.com \
+    --certificate-oidc-issuer=https://accounts.google.com
+  ```
+- **Run hardened**: `docker-compose.yml` runs the service with a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges` and memory/CPU/PID limits. The equivalent `docker run` flags are `--read-only --cap-drop=ALL --security-opt=no-new-privileges`; `make e2e-image` runs the test suites against the container with these restrictions.
 
 ### Option 2: Docker Compose
 
@@ -87,7 +106,7 @@ docker-compose up --build
 
 ```bash
 # Start MongoDB
-docker run -d -p 27017:27017 --name mongodb mongo:7.0
+docker run -d -p 127.0.0.1:27017:27017 --name mongodb mongo:7.0
 
 # Configure environment
 export MONGO_URI="mongodb://localhost:27017"
@@ -306,6 +325,8 @@ make bench       # micro benchmarks
 - **Performance suite** profiles the live server through pprof and writes `test/e2e/reports/perf-<label>.md` with latency percentiles, throughput, memory and goroutines per connection, CPU/allocation/heap hotspots and the optimization opportunities they point to. `E2E_BINARY` profiles another build and `E2E_PERF_BASELINE` adds a comparison column.
 
 ## ⚡ Performance
+
+Release builds use profile-guided optimization: `cmd/server/default.pgo` merges the CPU profiles the performance suite captures from the live server, and `make pgo` refreshes it.
 
 Driven by the performance suite's findings, measured on an Apple M3 Pro (11 cores) with the load generator and MongoDB on the same host:
 
