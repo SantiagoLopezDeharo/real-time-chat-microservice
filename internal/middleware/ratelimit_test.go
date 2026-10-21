@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -72,6 +73,60 @@ func TestRateLimiterConcurrentBurstIsExact(t *testing.T) {
 	wg.Wait()
 	if passed.Load() != burst {
 		t.Errorf("passed = %d, want exactly %d under concurrency", passed.Load(), burst)
+	}
+}
+
+func TestRateLimiterEvictsIdleFullBuckets(t *testing.T) {
+	rl := NewRateLimiter(rate.Limit(0.0001), 3)
+	clock := time.Now()
+	rl.now = func() time.Time { return clock }
+	handler, passed := countingHandler(rl)
+	size := func() int {
+		rl.mu.Lock()
+		defer rl.mu.Unlock()
+		return len(rl.visitors)
+	}
+
+	for _, user := range []string{"alice", "bob", "carol"} {
+		handler.ServeHTTP(httptest.NewRecorder(), requestAs(user))
+	}
+
+	clock = clock.Add(2 * evictionInterval)
+	handler.ServeHTTP(httptest.NewRecorder(), requestAs("dave"))
+	if got := size(); got != 4 {
+		t.Fatalf("buckets that are not full again were evicted: %d tracked, want 4", got)
+	}
+
+	clock = clock.Add(24 * time.Hour)
+	handler.ServeHTTP(httptest.NewRecorder(), requestAs("erin"))
+	if got := size(); got != 1 {
+		t.Fatalf("idle full buckets were kept: %d tracked, want 1", got)
+	}
+
+	before := passed.Load()
+	for range 5 {
+		handler.ServeHTTP(httptest.NewRecorder(), requestAs("alice"))
+	}
+	if got := passed.Load() - before; got != 3 {
+		t.Errorf("evicted user got %d requests through, want a fresh burst of 3", got)
+	}
+}
+
+func TestRateLimiterKeepsExhaustedBucketsAcrossSweeps(t *testing.T) {
+	rl := NewRateLimiter(rate.Limit(0.0001), 2)
+	clock := time.Now()
+	rl.now = func() time.Time { return clock }
+	handler, _ := countingHandler(rl)
+	for range 2 {
+		handler.ServeHTTP(httptest.NewRecorder(), requestAs("alice"))
+	}
+	for range 5 {
+		clock = clock.Add(evictionInterval)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, requestAs("alice"))
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("sweep reset an exhausted bucket: status %d", rec.Code)
+		}
 	}
 }
 

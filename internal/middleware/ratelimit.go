@@ -3,15 +3,20 @@ package middleware
 import (
 	"net/http"
 	"sync"
+	"time"
 
 	"golang.org/x/time/rate"
 )
 
+const evictionInterval = time.Minute
+
 type RateLimiter struct {
-	visitors map[string]*rate.Limiter
-	mu       sync.Mutex
-	rps      rate.Limit
-	burst    int
+	visitors  map[string]*rate.Limiter
+	mu        sync.Mutex
+	rps       rate.Limit
+	burst     int
+	now       func() time.Time
+	nextSweep time.Time
 }
 
 func NewRateLimiter(rps rate.Limit, burst int) *RateLimiter {
@@ -19,12 +24,28 @@ func NewRateLimiter(rps rate.Limit, burst int) *RateLimiter {
 		visitors: make(map[string]*rate.Limiter),
 		rps:      rps,
 		burst:    burst,
+		now:      time.Now,
+	}
+}
+
+// evictFull drops buckets that have refilled completely: a full bucket behaves
+// exactly like a new one, so forgetting it cannot let a user exceed the limit.
+func (rl *RateLimiter) evictFull(now time.Time) {
+	for userID, limiter := range rl.visitors {
+		if limiter.TokensAt(now) >= float64(rl.burst) {
+			delete(rl.visitors, userID)
+		}
 	}
 }
 
 func (rl *RateLimiter) getVisitor(userID string) *rate.Limiter {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+
+	if now := rl.now(); !now.Before(rl.nextSweep) {
+		rl.evictFull(now)
+		rl.nextSweep = now.Add(evictionInterval)
+	}
 
 	limiter, exists := rl.visitors[userID]
 	if !exists {
